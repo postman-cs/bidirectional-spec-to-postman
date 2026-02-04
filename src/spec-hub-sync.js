@@ -344,18 +344,35 @@ async function sync(options) {
   log(`  4. On spec change, re-run: node src/spec-hub-sync.js --spec ${options.spec}`);
 
   log('\n═══════════════════════════════════════════════════════════\n', BLUE);
+
+  return {
+    specId,
+    specName,
+    collections: generatedCollections
+  };
 }
 
-// Run
-const options = parseArgs();
+// Export for programmatic use
+export { sync, parseArgs, showHelp };
+export default sync;
 
-if (options.help) {
-  showHelp();
-  process.exit(0);
+// Run if executed directly
+const isMainModule = process.argv[1] && (
+  process.argv[1].endsWith('spec-hub-sync.js') ||
+  process.argv[1].includes('spec-hub-sync')
+);
+
+if (isMainModule) {
+  const options = parseArgs();
+
+  if (options.help) {
+    showHelp();
+    process.exit(0);
+  }
+
+  sync(options).catch(error => {
+    logError(`Sync failed: ${error.message}`);
+    console.error(error);
+    process.exit(1);
+  });
 }
-
-sync(options).catch(error => {
-  logError(`Sync failed: ${error.message}`);
-  console.error(error);
-  process.exit(1);
-});

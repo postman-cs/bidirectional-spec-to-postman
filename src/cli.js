@@ -14,13 +14,14 @@
  */
 
 import { Command } from 'commander';
-import { execSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { SpecHubClient } from './spec-hub-client.js';
 import { RepoSync } from './repo-sync.js';
 import { ReverseSync } from './reverse-sync.js';
 import { parseSpec } from './parser.js';
+import { loadConfig } from './config-loader.js';
+import { sync as forwardSync } from './spec-hub-sync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,20 +39,36 @@ program
 function addCommonOptions(cmd) {
   return cmd
     .requiredOption('-s, --spec <path>', 'Path to OpenAPI spec file')
-    .option('-w, --workspace <id>', 'Postman workspace ID', process.env.POSTMAN_WORKSPACE_ID)
-    .option('-k, --api-key <key>', 'Postman API key', process.env.POSTMAN_API_KEY)
+    .option('-w, --workspace <id>', 'Postman workspace ID')
+    .option('-k, --api-key <key>', 'Postman API key')
+    .option('-c, --config <path>', 'Path to sync.config.json')
     .option('-d, --dry-run', 'Preview changes without applying', false);
+}
+
+/**
+ * Load config and merge with CLI options
+ */
+function getConfig(options) {
+  const config = loadConfig({
+    workspace: options.workspace,
+    apiKey: options.apiKey,
+    config: options.config,
+    output: options.output,
+    strategy: options.strategy
+  });
+
+  return config;
 }
 
 /**
  * Validate required options
  */
-function validateOptions(options) {
-  if (!options.workspace) {
-    console.error('Error: Workspace ID required. Set POSTMAN_WORKSPACE_ID or use --workspace');
+function validateConfig(config) {
+  if (!config.workspace) {
+    console.error('Error: Workspace ID required. Set POSTMAN_WORKSPACE_ID, use --workspace, or configure in sync.config.json');
     process.exit(1);
   }
-  if (!options.apiKey) {
+  if (!config._apiKey) {
     console.error('Error: API key required. Set POSTMAN_API_KEY or use --api-key');
     process.exit(1);
   }
@@ -69,34 +86,35 @@ addCommonOptions(forwardCmd)
   .option('-t, --test-level <level>', 'Test level: smoke, contract, all, none', 'all')
   .option('--export-to-repo <path>', 'Also export collections to repo after sync')
   .action(async (options) => {
-    validateOptions(options);
+    const config = getConfig(options);
+    validateConfig(config);
 
     console.log('\nForward Sync: OpenAPI -> Postman');
     console.log('='.repeat(50));
 
-    // Delegate to existing spec-hub-sync.js
-    const args = [
-      `--spec "${options.spec}"`,
-      options.testLevel !== 'all' ? `--test-level ${options.testLevel}` : '',
-      options.dryRun ? '--dry-run' : ''
-    ].filter(Boolean).join(' ');
+    if (config._configPath) {
+      console.log(`Using config: ${config._configPath}`);
+    }
 
     try {
-      execSync(`node "${path.join(__dirname, 'spec-hub-sync.js')}" ${args}`, {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          POSTMAN_API_KEY: options.apiKey,
-          POSTMAN_WORKSPACE_ID: options.workspace
-        }
+      // Call sync directly instead of execSync
+      const result = await forwardSync({
+        spec: options.spec,
+        workspaceId: config.workspace,
+        apiKey: config._apiKey,
+        testLevel: options.testLevel,
+        dryRun: options.dryRun
       });
 
       // Export to repo if requested
       if (options.exportToRepo && !options.dryRun) {
         console.log('\nExporting to repo...');
-        await runRepoSync(options.spec, options.exportToRepo, options);
+        await runRepoSync(options.spec, options.exportToRepo, config);
       }
+
+      return result;
     } catch (error) {
+      console.error(`Forward sync failed: ${error.message}`);
       process.exit(1);
     }
   });
@@ -110,22 +128,35 @@ const repoCmd = program
   .description('Export Postman collections and environments to repo');
 
 addCommonOptions(repoCmd)
-  .option('-o, --output <dir>', 'Output directory', '.')
+  .option('-o, --output <dir>', 'Output directory')
   .option('--no-envs', 'Skip environment export')
   .action(async (options) => {
-    validateOptions(options);
-    await runRepoSync(options.spec, options.output, options);
+    const config = getConfig(options);
+    validateConfig(config);
+
+    const outputDir = options.output || config.repoSync.outputDir || '.';
+    await runRepoSync(options.spec, outputDir, config, options.envs);
   });
 
 /**
  * Run repo sync operation
  */
-async function runRepoSync(specPath, outputDir, options) {
+async function runRepoSync(specPath, outputDir, config, includeEnvs = true) {
   console.log('\nRepo Sync: Postman -> Filesystem');
   console.log('='.repeat(50));
 
-  const client = new SpecHubClient(options.apiKey, options.workspace);
-  const repoSync = new RepoSync(client);
+  if (config._configPath) {
+    console.log(`Using config: ${config._configPath}`);
+  }
+
+  const client = new SpecHubClient(config._apiKey, config.workspace);
+  const repoSync = new RepoSync(client, {
+    collectionsDir: path.join(config.repoSync.outputDir, config.repoSync.collections.directory),
+    environmentsDir: path.join(config.repoSync.outputDir, config.repoSync.environments.directory),
+    manifestFile: path.join(config.repoSync.outputDir, config.repoSync.manifest.filename),
+    sortKeys: config.repoSync.sortKeys,
+    indent: config.repoSync.prettyPrint ? 2 : 0
+  });
 
   const spec = await parseSpec(specPath);
   const specName = spec.info?.title || 'api';
@@ -150,7 +181,7 @@ async function runRepoSync(specPath, outputDir, options) {
 
   if (relevantCollections.length === 0) {
     console.log('    No matching collections found');
-    return;
+    return { collections: [], environments: [] };
   }
 
   console.log(`    Found ${relevantCollections.length} collections`);
@@ -163,7 +194,7 @@ async function runRepoSync(specPath, outputDir, options) {
 
   // Export environments
   let environments = [];
-  if (options.envs !== false) {
+  if (includeEnvs) {
     console.log('\n[2] Exporting environments...');
     const allEnvs = await client.getWorkspaceEnvironments();
 
@@ -190,6 +221,8 @@ async function runRepoSync(specPath, outputDir, options) {
   console.log('\nRepo sync complete');
   console.log(`  Collections: ${collections.length}`);
   console.log(`  Environments: ${environments.length}`);
+
+  return { collections, environments };
 }
 
 // ============================================================
@@ -201,19 +234,26 @@ const reverseCmd = program
   .description('Reverse sync: Postman collection -> OpenAPI spec');
 
 addCommonOptions(reverseCmd)
-  .requiredOption('-c, --collection <uid>', 'Collection UID to sync from')
-  .option('--strategy <strategy>', 'Conflict resolution: spec-wins, collection-wins', 'spec-wins')
+  .requiredOption('-C, --collection <uid>', 'Collection UID to sync from')
+  .option('--strategy <strategy>', 'Conflict resolution: spec-wins, collection-wins, interactive')
   .option('--output <path>', 'Output path for updated spec')
   .option('--no-tests', 'Skip syncing tests as vendor extensions')
   .action(async (options) => {
-    validateOptions(options);
+    const config = getConfig(options);
+    validateConfig(config);
+
+    const strategy = options.strategy || config.reverseSync.conflictStrategy;
 
     console.log('\nReverse Sync: Postman -> OpenAPI');
     console.log('='.repeat(50));
 
-    const client = new SpecHubClient(options.apiKey, options.workspace);
+    if (config._configPath) {
+      console.log(`Using config: ${config._configPath}`);
+    }
+
+    const client = new SpecHubClient(config._apiKey, config.workspace);
     const reverseSync = new ReverseSync(client, {
-      conflictStrategy: options.strategy,
+      conflictStrategy: strategy,
       storeTestsAsExtension: options.tests !== false
     });
 
@@ -232,6 +272,8 @@ addCommonOptions(reverseCmd)
       console.log(`  Would skip: ${result.wouldSkip} blocked changes`);
       console.log(`  Needs review: ${result.wouldReview} changes`);
     }
+
+    return result;
   });
 
 // ============================================================
@@ -244,36 +286,38 @@ const bidiCmd = program
   .description('Full bidirectional sync workflow');
 
 addCommonOptions(bidiCmd)
-  .option('-o, --output <dir>', 'Repo output directory', '.')
+  .option('-o, --output <dir>', 'Repo output directory')
   .option('--auto-merge', 'Automatically apply safe changes', false)
+  .option('--strategy <strategy>', 'Conflict resolution strategy')
   .action(async (options) => {
-    validateOptions(options);
+    const config = getConfig(options);
+    validateConfig(config);
 
     console.log('\nBidirectional Sync: Full Workflow');
     console.log('='.repeat(50));
 
-    const client = new SpecHubClient(options.apiKey, options.workspace);
+    if (config._configPath) {
+      console.log(`Using config: ${config._configPath}`);
+    }
+
+    const client = new SpecHubClient(config._apiKey, config.workspace);
+    const outputDir = options.output || config.repoSync.outputDir || '.';
 
     // Stage 1: Forward sync
     console.log('\n[Stage 1] Forward Sync (Spec -> Postman)');
     console.log('-'.repeat(40));
 
-    const args = [
-      `--spec "${options.spec}"`,
-      options.dryRun ? '--dry-run' : ''
-    ].filter(Boolean).join(' ');
-
+    let forwardResult;
     try {
-      execSync(`node "${path.join(__dirname, 'spec-hub-sync.js')}" ${args}`, {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          POSTMAN_API_KEY: options.apiKey,
-          POSTMAN_WORKSPACE_ID: options.workspace
-        }
+      forwardResult = await forwardSync({
+        spec: options.spec,
+        workspaceId: config.workspace,
+        apiKey: config._apiKey,
+        testLevel: 'all',
+        dryRun: options.dryRun
       });
     } catch (error) {
-      console.error('Forward sync failed');
+      console.error('Forward sync failed:', error.message);
       process.exit(1);
     }
 
@@ -282,17 +326,17 @@ addCommonOptions(bidiCmd)
     console.log('-'.repeat(40));
 
     if (!options.dryRun) {
-      await runRepoSync(options.spec, options.output, options);
+      await runRepoSync(options.spec, outputDir, config);
     } else {
       console.log('  Skipped (dry-run mode)');
     }
 
-    // Stage 3: Check for reverse sync
+    // Stage 3: Check for reverse sync and execute if auto-merge
     console.log('\n[Stage 3] Reverse Sync Check');
     console.log('-'.repeat(40));
 
     const repoSync = new RepoSync(client);
-    const status = await repoSync.getStatus(options.output);
+    const status = await repoSync.getStatus(outputDir);
 
     if (status.needsSync) {
       console.log('  Changes detected in Postman');
@@ -300,13 +344,56 @@ addCommonOptions(bidiCmd)
       console.log(`    Environments: ${status.changes.environments.length}`);
 
       if (options.autoMerge && !options.dryRun) {
-        console.log('  Auto-merging safe changes...');
-        // Would trigger reverse sync here for each changed collection
-      } else {
-        console.log('  Run with --auto-merge to apply safe changes');
+        console.log('\n  Auto-merging safe changes...');
+
+        const strategy = options.strategy || config.reverseSync.conflictStrategy;
+        const reverseSync = new ReverseSync(client, {
+          conflictStrategy: strategy,
+          storeTestsAsExtension: config.reverseSync.storeTestsAs === 'x-postman-tests'
+        });
+
+        // Get the main collection UID from manifest
+        const manifest = repoSync.loadManifest(outputDir);
+        const mainCollectionUid = Object.keys(manifest.collections).find(
+          uid => manifest.collections[uid].type === 'main'
+        );
+
+        if (mainCollectionUid) {
+          console.log(`  Syncing from collection: ${mainCollectionUid}`);
+
+          const result = await reverseSync.reverseSync(
+            options.spec,
+            mainCollectionUid,
+            { dryRun: false }
+          );
+
+          console.log(`\n  Reverse sync complete:`);
+          console.log(`    Applied: ${result.applied?.length || 0} changes`);
+          console.log(`    Skipped: ${result.skipped?.length || 0} changes`);
+
+          if (result.status === 'synced') {
+            // Re-export to repo after reverse sync
+            console.log('\n  Re-exporting to repo...');
+            await runRepoSync(options.spec, outputDir, config);
+          }
+        } else {
+          console.log('  No main collection found in manifest');
+        }
+      } else if (!options.autoMerge) {
+        console.log('\n  Run with --auto-merge to apply safe changes');
+        console.log('  Or run reverse sync manually:');
+
+        const manifest = repoSync.loadManifest(outputDir);
+        const mainCollectionUid = Object.keys(manifest.collections).find(
+          uid => manifest.collections[uid].type === 'main'
+        );
+
+        if (mainCollectionUid) {
+          console.log(`    spec-sync reverse --spec ${options.spec} --collection ${mainCollectionUid}`);
+        }
       }
     } else {
-      console.log('  No changes detected');
+      console.log('  No changes detected - in sync');
     }
 
     console.log('\nBidirectional sync complete');
@@ -320,11 +407,14 @@ program
   .command('status')
   .description('Show sync status and detect drift')
   .option('-s, --spec <path>', 'Path to OpenAPI spec')
-  .option('-o, --output <dir>', 'Repo output directory', '.')
-  .option('-w, --workspace <id>', 'Postman workspace ID', process.env.POSTMAN_WORKSPACE_ID)
-  .option('-k, --api-key <key>', 'Postman API key', process.env.POSTMAN_API_KEY)
+  .option('-o, --output <dir>', 'Repo output directory')
+  .option('-w, --workspace <id>', 'Postman workspace ID')
+  .option('-k, --api-key <key>', 'Postman API key')
+  .option('-c, --config <path>', 'Path to sync.config.json')
   .action(async (options) => {
-    if (!options.workspace || !options.apiKey) {
+    const config = getConfig(options);
+
+    if (!config.workspace || !config._apiKey) {
       console.error('Error: Workspace ID and API key required');
       process.exit(1);
     }
@@ -332,15 +422,20 @@ program
     console.log('\nSync Status');
     console.log('='.repeat(50));
 
-    const client = new SpecHubClient(options.apiKey, options.workspace);
+    if (config._configPath) {
+      console.log(`Using config: ${config._configPath}`);
+    }
+
+    const client = new SpecHubClient(config._apiKey, config.workspace);
+    const outputDir = options.output || config.repoSync.outputDir || '.';
     const repoSync = new RepoSync(client);
 
     try {
-      const status = await repoSync.getStatus(options.output);
+      const status = await repoSync.getStatus(outputDir);
 
       console.log(`\nLast Sync: ${status.lastSync || 'Never'}`);
       console.log(`Spec: ${status.specPath || 'Not configured'}`);
-      console.log(`Workspace: ${status.workspaceId || options.workspace}`);
+      console.log(`Workspace: ${status.workspaceId || config.workspace}`);
       console.log(`\nTracked Collections: ${status.trackedCollections}`);
       console.log(`Tracked Environments: ${status.trackedEnvironments}`);
 
@@ -356,6 +451,7 @@ program
         }
 
         console.log('\nRun "spec-sync repo" to export changes');
+        console.log('Run "spec-sync bidi --auto-merge" to sync bidirectionally');
       } else {
         console.log('\nStatus: In sync');
       }
