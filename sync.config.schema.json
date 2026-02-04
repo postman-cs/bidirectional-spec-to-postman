@@ -28,6 +28,9 @@
         "$ref": "#/definitions/specConfig"
       }
     },
+    "logging": {
+      "$ref": "#/definitions/loggingConfig"
+    },
     "forwardSync": {
       "$ref": "#/definitions/forwardSyncConfig"
     },
@@ -82,6 +85,29 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Tags to apply to this collection"
+        }
+      }
+    },
+    "loggingConfig": {
+      "type": "object",
+      "description": "Logging configuration",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error", "silent"],
+          "description": "Minimum log level to output",
+          "default": "info"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["text", "json"],
+          "description": "Log output format (json for CI/enterprise log aggregation)",
+          "default": "text"
+        },
+        "colors": {
+          "type": "boolean",
+          "description": "Use ANSI colors in text format (ignored if format=json)",
+          "default": true
         }
       }
     },

@@ -22,18 +22,33 @@ export const TestLevel = {
 };
 
 /**
+ * Generate a stable key for test script lookup
+ * Uses method + normalized path to handle renamed items
+ * @param {string} method - HTTP method
+ * @param {string} path - URL path
+ * @returns {string} Stable key
+ */
+export function generateTestKey(method, path) {
+  const normalizedMethod = (method || 'get').toLowerCase();
+  const normalizedPath = (path || '/').replace(/\/{2,}/g, '/');
+  return `${normalizedMethod}|${normalizedPath}`;
+}
+
+/**
  * Generate test scripts for all endpoints in a spec
  * @param {Object} api - Parsed OpenAPI spec
  * @param {string} level - Test level ('smoke' or 'contract')
- * @returns {Object} Map of endpoint names to test scripts
+ * @returns {Object} Map of endpoint keys to test scripts
  */
 export function generateTestScriptsForSpec(api, level = TestLevel.CONTRACT) {
   const endpoints = extractEndpoints(api);
   const testScripts = {};
 
   for (const endpoint of endpoints) {
-    const testName = endpoint.name || `${endpoint.method} ${endpoint.path}`;
-    testScripts[testName] = generateTestScript(endpoint, level);
+    // Use stable key based on method + path instead of name
+    // This survives item renames in Postman
+    const testKey = generateTestKey(endpoint.method, endpoint.path);
+    testScripts[testKey] = generateTestScript(endpoint, level);
   }
 
   // Add default test script for any unmatched endpoints
@@ -90,14 +105,24 @@ function generateSmokeTestScript(endpoint) {
   tests.push(`});`);
   tests.push('');
 
-  // 3. Basic response body check (not empty for success codes)
+  // 3. Basic response body check (not empty for success codes with body)
   tests.push(`// Response body exists`);
   tests.push(`pm.test("Response body is not empty", function () {`);
   tests.push(`    if (pm.response.code >= 200 && pm.response.code < 300) {`);
+  tests.push(`        // Skip for 204 No Content`);
+  tests.push(`        if (pm.response.code === 204) {`);
+  tests.push(`            return;`);
+  tests.push(`        }`);
   tests.push(`        const contentType = pm.response.headers.get("Content-Type");`);
   tests.push(`        if (contentType && contentType.includes("application/json")) {`);
-  tests.push(`            const jsonData = pm.response.json();`);
-  tests.push(`            pm.expect(jsonData).to.not.be.undefined;`);
+  tests.push(`            try {`);
+  tests.push(`                const jsonData = pm.response.json();`);
+  tests.push(`                pm.expect(jsonData).to.not.be.undefined;`);
+  tests.push(`            } catch (e) {`);
+  tests.push(`                pm.expect.fail("Response body is not valid JSON");`);
+  tests.push(`            }`);
+  tests.push(`        } else if (!contentType || contentType.includes("text")) {`);
+  tests.push(`            pm.expect(pm.response.text()).to.not.be.empty;`);
   tests.push(`        }`);
   tests.push(`    }`);
   tests.push(`});`);
@@ -118,14 +143,20 @@ function generateContractTestScript(endpoint) {
   tests.push(`// Comprehensive validation - generated from OpenAPI spec`);
   tests.push('');
 
-  // 1. Status code validation
+  // 1. Status code validation - accept any defined 2xx success code
   const statusCodes = Object.keys(endpoint.responses);
   const successCodes = statusCodes.filter(code => code.startsWith('2'));
   if (successCodes.length > 0) {
-    const expectedCode = successCodes[0];
     tests.push(`// Status code validation`);
-    tests.push(`pm.test("Status code is ${expectedCode}", function () {`);
-    tests.push(`    pm.response.to.have.status(${expectedCode});`);
+    if (successCodes.length === 1) {
+      // Single success code - use exact match
+      tests.push(`pm.test("Status code is ${successCodes[0]}", function () {`);
+      tests.push(`    pm.response.to.have.status(${successCodes[0]});`);
+    } else {
+      // Multiple success codes - use oneOf
+      tests.push(`pm.test("Status code is valid", function () {`);
+      tests.push(`    pm.expect(pm.response.code).to.be.oneOf([${successCodes.join(', ')}]);`);
+    }
     tests.push(`});`);
     tests.push('');
   }
@@ -154,13 +185,20 @@ function generateContractTestScript(endpoint) {
     }
   }
 
-  // 4. JSON Schema validation
+  // 4. JSON Schema validation (only for JSON responses)
   const schemaInfo = getResponseSchema(endpoint.responses, '200') ||
                      getResponseSchema(endpoint.responses, '201');
   
   if (schemaInfo?.schema) {
     tests.push(`// JSON Schema validation`);
     tests.push(`pm.test("Response matches schema structure", function () {`);
+    tests.push(`    // Check Content-Type before parsing`);
+    tests.push(`    const contentType = pm.response.headers.get("Content-Type") || "";`);
+    tests.push(`    if (!contentType.includes("application/json")) {`);
+    tests.push(`        pm.expect.fail("Response is not JSON, cannot validate schema");`);
+    tests.push(`        return;`);
+    tests.push(`    }`);
+    tests.push(`    `);
     tests.push(`    const jsonData = pm.response.json();`);
     tests.push(`    `);
     tests.push(`    // Basic type validation`);
@@ -177,6 +215,12 @@ function generateContractTestScript(endpoint) {
     if (requiredFields.length > 0) {
       tests.push(`// Required field validation`);
       tests.push(`pm.test("Response has required fields", function () {`);
+      tests.push(`    const contentType = pm.response.headers.get("Content-Type") || "";`);
+      tests.push(`    if (!contentType.includes("application/json")) {`);
+      tests.push(`        pm.expect.fail("Response is not JSON, cannot validate fields");`);
+      tests.push(`        return;`);
+      tests.push(`    }`);
+      tests.push(`    `);
       tests.push(`    const jsonData = pm.response.json();`);
       tests.push(`    const dataToCheck = Array.isArray(jsonData) ? (jsonData[0] || {}) : jsonData;`);
       tests.push(`    `);
@@ -192,6 +236,12 @@ function generateContractTestScript(endpoint) {
     if (advancedValidations.length > 0) {
       tests.push(`// Advanced schema validations (enum, format, constraints)`);
       tests.push(`pm.test("Field values match schema constraints", function () {`);
+      tests.push(`    const contentType = pm.response.headers.get("Content-Type") || "";`);
+      tests.push(`    if (!contentType.includes("application/json")) {`);
+      tests.push(`        pm.expect.fail("Response is not JSON, cannot validate constraints");`);
+      tests.push(`        return;`);
+      tests.push(`    }`);
+      tests.push(`    `);
       tests.push(`    const jsonData = pm.response.json();`);
       tests.push(`    const dataToCheck = Array.isArray(jsonData) ? (jsonData[0] || {}) : jsonData;`);
       tests.push(`    `);
@@ -209,9 +259,12 @@ function generateContractTestScript(endpoint) {
     tests.push(`// Error response structure validation`);
     tests.push(`pm.test("Error responses have proper structure", function () {`);
     tests.push(`    if (pm.response.code >= 400) {`);
-    tests.push(`        const jsonData = pm.response.json();`);
-    tests.push(`        const hasErrorField = jsonData.hasOwnProperty('error') || jsonData.hasOwnProperty('message') || jsonData.hasOwnProperty('detail');`);
-    tests.push(`        pm.expect(hasErrorField).to.be.true;`);
+    tests.push(`        const contentType = pm.response.headers.get("Content-Type") || "";`);
+    tests.push(`        if (contentType.includes("application/json")) {`);
+    tests.push(`            const jsonData = pm.response.json();`);
+    tests.push(`            const hasErrorField = jsonData.hasOwnProperty('error') || jsonData.hasOwnProperty('message') || jsonData.hasOwnProperty('detail');`);
+    tests.push(`            pm.expect(hasErrorField).to.be.true;`);
+    tests.push(`        }`);
     tests.push(`    }`);
     tests.push(`});`);
     tests.push('');

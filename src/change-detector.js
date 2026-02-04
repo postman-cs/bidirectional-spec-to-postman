@@ -20,15 +20,16 @@ export const CHANGE_DIRECTION = {
 };
 
 // Fields that ONLY flow spec -> collection (never reverse sync)
+// Using dot-delimited patterns to match path strings
 const SPEC_SOURCE_OF_TRUTH = [
   'openapi',
   'paths',
-  'components/schemas',
-  'components/securitySchemes',
-  'components/parameters',
-  'components/requestBodies',
-  'components/responses',
-  'components/headers',
+  'components.schemas',
+  'components.securitySchemes',
+  'components.parameters',
+  'components.requestBodies',
+  'components.responses',
+  'components.headers',
   'servers',
   'security'
 ];

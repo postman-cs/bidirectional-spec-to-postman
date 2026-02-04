@@ -23,7 +23,9 @@
     "test": "node --test src/__tests__/*.test.js",
     "test:unit": "node --test src/__tests__/*.test.js",
     "test:integration": "node --test src/__tests__/integration/**/*.test.js",
-    "test:all": "npm run test:unit && npm run test:integration"
+    "test:all": "npm run test:unit && npm run test:integration",
+    "test:coverage": "node --test --experimental-test-coverage src/__tests__/*.test.js",
+    "test:coverage:report": "node --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info src/__tests__/*.test.js"
   },
   "keywords": [
     "openapi",
@@ -41,7 +43,6 @@
     "js-yaml": "^4.1.0",
     "yaml": "^2.7.0"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }

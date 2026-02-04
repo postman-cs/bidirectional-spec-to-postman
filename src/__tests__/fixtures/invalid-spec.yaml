@@ -1,0 +1,15 @@
+# Intentionally invalid YAML/OpenAPI for error handling tests
+openapi: 3.0.3
+info:
+  title: Invalid API
+  # Missing required version field
+paths:
+  /test:
+    get:
+      # Invalid response - missing description
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NonExistent'  # Invalid $ref

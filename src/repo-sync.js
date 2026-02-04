@@ -14,13 +14,17 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { createLogger } from './logger.js';
+
+const logger = createLogger({ name: 'repo-sync' });
 
 const DEFAULT_CONFIG = {
   collectionsDir: 'postman/collections',
   environmentsDir: 'postman/environments',
   manifestFile: 'postman/.sync-manifest.json',
   indent: 2,
-  sortKeys: true
+  sortKeys: true,
+  dryRun: false
 };
 
 export class RepoSync {
@@ -37,7 +41,10 @@ export class RepoSync {
    */
   async exportCollections(specName, collectionUids, outputDir) {
     const collectionsDir = path.join(outputDir, this.config.collectionsDir);
-    fs.mkdirSync(collectionsDir, { recursive: true });
+    
+    if (!this.config.dryRun) {
+      fs.mkdirSync(collectionsDir, { recursive: true });
+    }
 
     const exports = [];
 
@@ -49,7 +56,12 @@ export class RepoSync {
         const filename = this.generateFilename(specName, type, 'collection');
         const filepath = path.join(collectionsDir, filename);
 
-        this.writeJsonFile(filepath, normalized);
+        if (!this.config.dryRun) {
+          this.writeJsonFile(filepath, normalized);
+          logger.info(`Exported: ${filename}`);
+        } else {
+          logger.info(`Would export: ${filename}`);
+        }
 
         exports.push({
           type,
@@ -58,10 +70,8 @@ export class RepoSync {
           hash: this.hashContent(normalized),
           updatedAt: collection.collection?.info?.updatedAt
         });
-
-        console.log(`  Exported: ${filename}`);
       } catch (error) {
-        console.error(`  Failed to export collection ${uid}: ${error.message}`);
+        logger.error(`Failed to export collection ${uid}`, { error: error.message });
       }
     }
 
@@ -76,7 +86,10 @@ export class RepoSync {
    */
   async exportEnvironments(specName, environmentUids, outputDir) {
     const envsDir = path.join(outputDir, this.config.environmentsDir);
-    fs.mkdirSync(envsDir, { recursive: true });
+    
+    if (!this.config.dryRun) {
+      fs.mkdirSync(envsDir, { recursive: true });
+    }
 
     const exports = [];
 
@@ -88,7 +101,12 @@ export class RepoSync {
         const filename = `${this.slugify(name)}.environment.json`;
         const filepath = path.join(envsDir, filename);
 
-        this.writeJsonFile(filepath, sanitized);
+        if (!this.config.dryRun) {
+          this.writeJsonFile(filepath, sanitized);
+          logger.info(`Exported: ${filename}`);
+        } else {
+          logger.info(`Would export: ${filename}`);
+        }
 
         exports.push({
           name,
@@ -97,10 +115,8 @@ export class RepoSync {
           hash: this.hashContent(sanitized),
           updatedAt: envData.environment?.updatedAt
         });
-
-        console.log(`  Exported: ${filename}`);
       } catch (error) {
-        console.error(`  Failed to export environment ${uid}: ${error.message}`);
+        logger.error(`Failed to export environment ${uid}`, { error: error.message });
       }
     }
 
@@ -109,26 +125,16 @@ export class RepoSync {
 
   /**
    * Normalize collection for deterministic Git diffs
-   * - Removes volatile fields
+   * - Removes volatile fields (only from metadata, not request/response bodies)
    * - Sorts keys
    * - Normalizes script whitespace
    */
   normalizeCollection(collection) {
     const normalized = JSON.parse(JSON.stringify(collection));
 
-    // Remove volatile fields that change on every export
-    const volatileFields = [
-      '_postman_id',
-      'id',
-      'uid',
-      'owner',
-      'createdAt',
-      'updatedAt',
-      'lastUpdatedBy',
-      'fork'
-    ];
-
-    this.removeVolatileFields(normalized, volatileFields);
+    // Remove volatile fields from collection metadata only
+    // NOT from request/response bodies or schemas
+    this.removeVolatileFieldsFromMetadata(normalized);
 
     // Normalize script whitespace
     this.normalizeScripts(normalized.item);
@@ -165,16 +171,119 @@ export class RepoSync {
   }
 
   /**
-   * Remove volatile fields recursively
+   * Remove volatile fields from collection metadata only
+   * Preserves id fields in request/response bodies and schemas
    */
-  removeVolatileFields(obj, fields) {
-    if (Array.isArray(obj)) {
-      obj.forEach(item => this.removeVolatileFields(item, fields));
-    } else if (obj && typeof obj === 'object') {
-      for (const field of fields) {
-        delete obj[field];
+  removeVolatileFieldsFromMetadata(collection) {
+    // Volatile metadata fields at collection level
+    const volatileMetadataFields = [
+      '_postman_id',
+      'id',
+      'uid',
+      'owner',
+      'createdAt',
+      'updatedAt',
+      'lastUpdatedBy',
+      'fork'
+    ];
+
+    // Remove from collection root
+    for (const field of volatileMetadataFields) {
+      delete collection[field];
+    }
+
+    // Remove from info object
+    if (collection.info) {
+      for (const field of volatileMetadataFields) {
+        delete collection.info[field];
       }
-      Object.values(obj).forEach(val => this.removeVolatileFields(val, fields));
+    }
+
+    // Process items recursively, but only remove metadata fields
+    // Never touch request/response bodies
+    this.removeMetadataFieldsFromItems(collection.item, volatileMetadataFields);
+  }
+
+  /**
+   * Remove metadata fields from collection items only
+   * Preserves body content, schemas, and examples
+   */
+  removeMetadataFieldsFromItems(items, fields) {
+    if (!Array.isArray(items)) return;
+
+    for (const item of items) {
+      if (!item) continue;
+
+      // Remove from item metadata only
+      for (const field of fields) {
+        delete item[field];
+      }
+
+      // If this is a folder (has nested items), recurse
+      if (item.item) {
+        this.removeMetadataFieldsFromItems(item.item, fields);
+        continue;
+      }
+
+      // For request items, only remove from specific metadata locations
+      // NEVER from request.body, response.body, or any content fields
+      if (item.request) {
+        // Remove from request metadata only
+        for (const field of fields) {
+          delete item.request[field];
+        }
+
+        // Remove from URL object metadata if present
+        if (item.request.url && typeof item.request.url === 'object') {
+          for (const field of fields) {
+            delete item.request.url[field];
+          }
+        }
+
+        // Remove from header metadata
+        if (Array.isArray(item.request.header)) {
+          for (const header of item.request.header) {
+            for (const field of fields) {
+              delete header[field];
+            }
+          }
+        }
+
+        // NOTE: Intentionally NOT removing from item.request.body
+        // This preserves examples and schemas
+      }
+
+      // Remove from response metadata only, NOT response body
+      if (Array.isArray(item.response)) {
+        for (const response of item.response) {
+          for (const field of fields) {
+            delete response[field];
+          }
+          // Remove from response header metadata
+          if (Array.isArray(response.header)) {
+            for (const header of response.header) {
+              for (const field of fields) {
+                delete header[field];
+              }
+            }
+          }
+          // NOTE: Intentionally NOT removing from response.body
+        }
+      }
+
+      // Remove from event (script) metadata
+      if (Array.isArray(item.event)) {
+        for (const event of item.event) {
+          for (const field of fields) {
+            delete event[field];
+          }
+          if (event.script && typeof event.script === 'object') {
+            for (const field of fields) {
+              delete event.script[field];
+            }
+          }
+        }
+      }
     }
   }
 
@@ -308,14 +417,19 @@ export class RepoSync {
       };
     }
 
-    this.writeJsonFile(manifestPath, manifest);
-    console.log(`  Updated manifest: ${this.config.manifestFile}`);
+    if (!this.config.dryRun) {
+      this.writeJsonFile(manifestPath, manifest);
+      logger.info(`Updated manifest: ${this.config.manifestFile}`);
+    } else {
+      logger.info(`Would update manifest: ${this.config.manifestFile}`);
+    }
 
     return manifest;
   }
 
   /**
    * Check for changes by comparing updatedAt timestamps
+   * Detects new, modified, and deleted items
    * @param {string} outputDir - Directory containing manifest
    * @returns {object} Change detection results
    */
@@ -327,11 +441,15 @@ export class RepoSync {
       hasChanges: false
     };
 
-    // Get current workspace state (2 API calls)
-    const currentCollections = await this.client.getWorkspaceCollections();
-    const currentEnvironments = await this.client.getWorkspaceEnvironments();
+    // Get current workspace state with pagination support
+    const currentCollections = await this.getAllWorkspaceCollections();
+    const currentEnvironments = await this.getAllWorkspaceEnvironments();
 
-    // Check collections for changes
+    // Create sets for efficient lookup
+    const currentCollectionUids = new Set(currentCollections.map(c => c.uid));
+    const currentEnvironmentUids = new Set(currentEnvironments.map(e => e.uid));
+
+    // Check collections for changes (new and modified)
     for (const coll of currentCollections) {
       const tracked = manifest.collections[coll.uid];
 
@@ -350,7 +468,19 @@ export class RepoSync {
       }
     }
 
-    // Check environments for changes
+    // Check for deleted collections (in manifest but not in workspace)
+    for (const [uid, tracked] of Object.entries(manifest.collections)) {
+      if (!currentCollectionUids.has(uid)) {
+        changes.collections.push({
+          uid,
+          name: tracked.name || tracked.filename || 'Unknown',
+          change: 'deleted'
+        });
+        changes.hasChanges = true;
+      }
+    }
+
+    // Check environments for changes (new and modified)
     for (const env of currentEnvironments) {
       const tracked = manifest.environments[env.uid];
 
@@ -369,7 +499,69 @@ export class RepoSync {
       }
     }
 
+    // Check for deleted environments
+    for (const [uid, tracked] of Object.entries(manifest.environments)) {
+      if (!currentEnvironmentUids.has(uid)) {
+        changes.environments.push({
+          uid,
+          name: tracked.name || tracked.filename || 'Unknown',
+          change: 'deleted'
+        });
+        changes.hasChanges = true;
+      }
+    }
+
     return changes;
+  }
+
+  /**
+   * Get all collections with pagination support
+   * @returns {Array} All collections in workspace
+   */
+  async getAllWorkspaceCollections() {
+    const allCollections = [];
+    let cursor = null;
+    
+    do {
+      const result = await this.client.request(
+        'GET', 
+        `/collections?workspace=${this.client.workspaceId}${cursor ? `&cursor=${cursor}` : ''}`
+      );
+      
+      if (result.collections) {
+        allCollections.push(...result.collections);
+      }
+      
+      // Check for pagination cursor
+      cursor = result.meta?.nextCursor || result.nextCursor || null;
+    } while (cursor);
+    
+    return allCollections;
+  }
+
+  /**
+   * Get all environments with pagination support
+   * @returns {Array} All environments in workspace
+   */
+  async getAllWorkspaceEnvironments() {
+    const allEnvironments = [];
+    let cursor = null;
+    
+    do {
+      const result = await this.client.request(
+        'GET', 
+        `/environments?workspace=${this.client.workspaceId}${cursor ? `&cursor=${cursor}` : ''}`
+      );
+      
+      if (result.environments) {
+        allEnvironments.push(...result.environments);
+      }
+      
+      // Check for pagination cursor
+      cursor = result.meta?.nextCursor || result.nextCursor || null;
+    } while (cursor);
+    
+    return allEnvironments;
   }
 
   /**

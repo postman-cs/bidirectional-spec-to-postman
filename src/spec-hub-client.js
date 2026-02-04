@@ -2,67 +2,318 @@
 
 /**
  * Spec Hub Client
- * 
+ *
  * Handles all interactions with Postman Spec Hub API.
  * Uses native fetch with Postman API key authentication.
  */
 
 import fs from 'fs';
+import vm from 'vm';
+import { createLogger } from './logger.js';
 
 const POSTMAN_API_BASE = 'https://api.getpostman.com';
+const DEFAULT_TIMEOUT = 30000; // 30 seconds
+
+// Create logger instance
+const logger = createLogger({ name: 'spec-hub-client' });
+
+/**
+ * Custom error classes for different failure types
+ */
+export class NetworkError extends Error {
+  constructor(message, cause) {
+    super(message);
+    this.name = 'NetworkError';
+    this.cause = cause;
+  }
+}
+
+export class AuthenticationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class RateLimitError extends Error {
+  constructor(message, retryAfter) {
+    super(message);
+    this.name = 'RateLimitError';
+    this.retryAfter = retryAfter;
+  }
+}
+
+export class NotFoundError extends Error {
+  constructor(message, resource) {
+    super(message);
+    this.name = 'NotFoundError';
+    this.resource = resource;
+  }
+}
 
 class SpecHubClient {
-  constructor(apiKey, workspaceId) {
+  constructor(apiKey, workspaceId, options = {}) {
     this.apiKey = apiKey;
     this.workspaceId = workspaceId;
+    this.timeout = options.timeout || DEFAULT_TIMEOUT;
+    this.maxRetries = options.maxRetries || 3;
+    this.retryDelay = options.retryDelay || 1000; // Base delay in ms
+    this.maxRetryDelay = options.maxRetryDelay || 30000; // Max delay in ms
   }
 
   /**
-   * Make authenticated API request
+   * Calculate retry delay with exponential backoff and jitter
+   * @param {number} attempt - Current attempt number (0-indexed)
+   * @param {number} retryAfter - Optional Retry-After header value in seconds
+   * @returns {number} Delay in milliseconds
    */
-  async request(method, endpoint, body = null) {
+  calculateRetryDelay(attempt, retryAfter = null) {
+    // If server provided Retry-After, use it (with small buffer)
+    if (retryAfter) {
+      return Math.min(retryAfter * 1000 + 100, this.maxRetryDelay);
+    }
+    
+    // Exponential backoff: 1s, 2s, 4s, 8s...
+    const exponentialDelay = this.retryDelay * Math.pow(2, attempt);
+    
+    // Add jitter (±25%) to prevent thundering herd
+    const jitter = exponentialDelay * 0.25 * (Math.random() * 2 - 1);
+    
+    return Math.min(exponentialDelay + jitter, this.maxRetryDelay);
+  }
+
+  /**
+   * Execute request with retry logic for transient failures
+   * @param {string} method - HTTP method
+   * @param {string} endpoint - API endpoint
+   * @param {object|null} body - Request body
+   * @param {object} options - Additional options
+   */
+  async requestWithRetry(method, endpoint, body = null, options = {}) {
+    let lastError;
+    
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        return await this.request(method, endpoint, body, options);
+      } catch (error) {
+        lastError = error;
+        
+        // Don't retry on 4xx errors (client errors)
+        if (error instanceof AuthenticationError ||
+            (error.message && error.message.match(/API Error 4\d{2}/))) {
+          throw error;
+        }
+        
+        // Check if this is the last attempt
+        if (attempt >= this.maxRetries) {
+          break;
+        }
+        
+        // Get Retry-After header if available
+        const retryAfter = error.retryAfter || null;
+        
+        // Calculate delay
+        const delay = this.calculateRetryDelay(attempt, retryAfter);
+        
+        logger.warn(`Request failed, retrying... (${attempt + 1}/${this.maxRetries})`, {
+          endpoint,
+          error: error.message,
+          delay: Math.round(delay)
+        });
+        
+        await this.sleep(delay);
+      }
+    }
+    
+    throw lastError;
+  }
+
+  /**
+   * Make authenticated API request with timeout and error handling
+   * @param {string} method - HTTP method
+   * @param {string} endpoint - API endpoint
+   * @param {object|null} body - Request body
+   * @param {object} options - Additional options (timeout)
+   */
+  async request(method, endpoint, body = null, options = {}) {
     const url = `${POSTMAN_API_BASE}${endpoint}`;
-    const options = {
+    const timeout = options.timeout || this.timeout;
+
+    // Create AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    const fetchOptions = {
       method,
       headers: {
         'X-Api-Key': this.apiKey,
         'Content-Type': 'application/json'
-      }
+      },
+      signal: controller.signal
     };
 
     if (body) {
-      options.body = JSON.stringify(body);
+      fetchOptions.body = JSON.stringify(body);
     }
 
-    const response = await fetch(url, options);
-    const data = await response.json();
+    try {
+      logger.debug(`API request: ${method} ${endpoint}`);
+      const response = await fetch(url, fetchOptions);
+      clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      throw new Error(`API Error ${response.status}: ${JSON.stringify(data.error || data)}`);
+      let data;
+      const contentType = response.headers.get('content-type') || '';
+      
+      // Handle empty responses (204 No Content)
+      if (response.status === 204) {
+        return null;
+      }
+      
+      // Only parse JSON if content-type indicates JSON
+      if (contentType.includes('application/json')) {
+        try {
+          data = await response.json();
+        } catch (parseError) {
+          data = { error: 'Failed to parse JSON response', raw: await response.text() };
+        }
+      } else {
+        // For non-JSON responses, return text or empty object
+        const text = await response.text();
+        data = text ? { raw: text } : {};
+      }
+
+      if (!response.ok) {
+        // Handle specific error types
+        if (response.status === 401) {
+          throw new AuthenticationError(`Authentication failed for ${endpoint}. Check your API key.`);
+        }
+        if (response.status === 404) {
+          throw new NotFoundError(`Resource not found: ${endpoint}`, endpoint);
+        }
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          throw new RateLimitError(`Rate limit exceeded for ${endpoint}`, retryAfter);
+        }
+
+        const errorMessage = data.error?.message || data.error || JSON.stringify(data);
+        throw new Error(`API Error ${response.status} on ${method} ${endpoint}: ${errorMessage}`);
+      }
+
+      return data;
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      if (error.name === 'AbortError') {
+        throw new NetworkError(`Request timeout after ${timeout}ms: ${method} ${endpoint}`, error);
+      }
+
+      if (error instanceof NetworkError ||
+          error instanceof AuthenticationError ||
+          error instanceof RateLimitError ||
+          error instanceof NotFoundError) {
+        throw error;
+      }
+
+      // Network errors
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+        throw new NetworkError(`Network error: ${error.message}`, error);
+      }
+
+      throw error;
     }
+  }
 
-    return data;
+  /**
+   * Detect OpenAPI version from spec content
+   * @param {string|object} specContent - OpenAPI spec content
+   * @returns {string} Version string like '3.0', '3.1', '2.0' or 'unknown'
+   */
+  detectOpenApiVersion(specContent) {
+    try {
+      const spec = typeof specContent === 'string' ? JSON.parse(specContent) : specContent;
+      
+      // Check for OpenAPI 3.x
+      if (spec.openapi) {
+        const version = spec.openapi.startsWith('3.1') ? '3.1' : 
+                       spec.openapi.startsWith('3.0') ? '3.0' : '3.0';
+        return version;
+      }
+      
+      // Check for Swagger 2.0
+      if (spec.swagger && spec.swagger.startsWith('2.0')) {
+        return '2.0';
+      }
+      
+      return '3.0'; // Default to 3.0
+    } catch {
+      return '3.0'; // Default to 3.0 on parse error
+    }
+  }
+
+  /**
+   * Detect if spec is YAML format
+   * @param {string} specContent - Raw spec content
+   * @returns {boolean} True if YAML format
+   */
+  detectYamlFormat(specContent) {
+    if (typeof specContent !== 'string') return false;
+    
+    // Check for YAML indicators (not JSON)
+    const trimmed = specContent.trim();
+    
+    // If it starts with { or [, it's JSON
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return false;
+    }
+    
+    // Check for YAML-specific patterns
+    const yamlIndicators = [
+      /^openapi:\s/m,
+      /^swagger:\s/m,
+      /^info:\s/m,
+      /^paths:\s/m,
+      /^---\s*$/m
+    ];
+    
+    return yamlIndicators.some(pattern => pattern.test(trimmed));
   }
 
   /**
    * Upload or update spec in Spec Hub
+   * Properly detects OpenAPI version and format
    */
   async uploadSpec(name, specContent, specId = null) {
+    const version = this.detectOpenApiVersion(specContent);
+    const isYaml = this.detectYamlFormat(specContent);
+    
+    // Determine the type and file path
+    // Postman API uses format like "openapi:3" or "openapi:3_1"
+    const type = version === '3.1' ? 'openapi:3_1' : 
+                 version === '2.0' ? 'openapi:2' : 'openapi:3';
+    
+    // Use appropriate file extension
+    const filePath = isYaml ? 'index.yaml' : 'index.json';
+    
+    // Ensure content is a string
+    const contentStr = typeof specContent === 'string' 
+      ? specContent 
+      : JSON.stringify(specContent, null, 2);
+
     const payload = {
       name,
-      type: 'OPENAPI:3.0',
+      type,
       files: [
         {
-          path: 'index.json',
-          content: typeof specContent === 'string' ? specContent : JSON.stringify(specContent)
+          path: filePath,
+          content: contentStr
         }
       ]
     };
 
     if (specId) {
       // Update existing spec
-      await this.request('PATCH', `/specs/${specId}/files/index.json`, {
-        content: payload.files[0].content
+      await this.request('PATCH', `/specs/${specId}/files/${filePath}`, {
+        content: contentStr
       });
       return specId;
     } else {
@@ -81,17 +332,14 @@ class SpecHubClient {
       const result = await this.request('GET', `/specs/${specId}/generations/collection`);
       return result.collections || [];
     } catch (error) {
-      // Check if it's a 404 (no collections yet) vs a real API error
-      const statusMatch = error.message.match(/API Error (\d+)/);
-      const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-      
-      if (statusCode === 404) {
+      // Check if it's a NotFoundError (no collections yet) vs a real API error
+      if (error instanceof NotFoundError) {
         // No collections generated yet - this is expected for new specs
         return [];
       }
       
       // For other errors, log and re-throw
-      console.error(`  Error fetching spec collections: ${error.message}`);
+      logger.error(`Error fetching spec collections`, { error: error.message });
       throw error;
     }
   }
@@ -111,7 +359,7 @@ class SpecHubClient {
       // Collection exists, sync it with the spec
       // The ID from spec generations is just the collection ID
       // We need to find the full UID from the collections list
-      console.log(`  Syncing existing collection: ${existingCollection.id}`);
+      logger.info(`Syncing existing collection: ${existingCollection.id}`);
       await this.syncCollectionWithSpec(existingCollection.id, specId);
       
       // Wait for sync to complete
@@ -129,7 +377,7 @@ class SpecHubClient {
     }
 
     // No existing collection, generate new one
-    console.log(`  Generating new collection: ${name}`);
+    logger.info(`Generating new collection: ${name}`);
     const payload = {
       name,
       options: {
@@ -187,7 +435,7 @@ class SpecHubClient {
         }
       } catch (error) {
         // Collection might be temporarily unavailable during sync
-        console.log(`  Waiting for sync... (${i + 1}/${maxAttempts})`);
+        logger.debug(`Waiting for sync... (${i + 1}/${maxAttempts})`);
       }
       
       // Exponential backoff: 2s, 3s, 4.5s, 6.75s... (max 10s)
@@ -214,7 +462,7 @@ class SpecHubClient {
           return collection;
         }
       } catch (error) {
-        console.log(`  Waiting for generation... (${i + 1}/${maxAttempts})`);
+        logger.debug(`Waiting for generation... (${i + 1}/${maxAttempts})`);
       }
       
       // Exponential backoff
@@ -244,7 +492,7 @@ class SpecHubClient {
         
         if (i < maxRetries - 1) {
           const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s
-          console.log(`  Retrying collection fetch... (${i + 1}/${maxRetries})`);
+          logger.debug(`Retrying collection fetch... (${i + 1}/${maxRetries})`);
           await this.sleep(delay);
         }
       }
@@ -279,7 +527,19 @@ class SpecHubClient {
    */
   async addTestScripts(collectionUid, testScripts) {
     const collectionData = await this.getCollection(collectionUid);
+
+    // Validate response structure
+    if (!collectionData || !collectionData.collection) {
+      throw new Error(`Invalid collection response: collection data missing for ${collectionUid}`);
+    }
+
     const collection = collectionData.collection;
+
+    // Validate item array
+    if (!collection.item || !Array.isArray(collection.item)) {
+      logger.warn(`Collection ${collectionUid} has no items array, skipping test injection`);
+      return collection;
+    }
 
     // Recursively add tests to all request items
     this.addTestsToItems(collection.item, testScripts);
@@ -291,14 +551,85 @@ class SpecHubClient {
   }
 
   /**
+   * Generate a stable key for test script lookup from collection item
+   * Matches the key generation in test-generator.js
+   * @param {object} request - Postman request object
+   * @returns {string} Stable key
+   */
+  generateTestKeyFromItem(request) {
+    const method = (request.method || 'get').toLowerCase();
+    
+    // Extract path from URL
+    let path = '/';
+    const url = request.url;
+    
+    if (typeof url === 'string') {
+      // Handle Postman variable syntax
+      const urlStr = url.replace(/\{\{[^}]+\}\}/g, '');
+      try {
+        path = new URL(urlStr).pathname || '/';
+      } catch {
+        // Fallback: extract path manually
+        path = urlStr.replace(/^https?:\/\/[^\/]+/, '') || '/';
+      }
+    } else if (url && typeof url === 'object') {
+      if (url.path && Array.isArray(url.path)) {
+        path = '/' + url.path.join('/');
+      } else if (url.pathname) {
+        path = url.pathname;
+      }
+    }
+    
+    // Normalize path
+    path = path.replace(/\/{2,}/g, '/');
+    if (!path.startsWith('/')) path = '/' + path;
+    
+    return `${method}|${path}`;
+  }
+
+  /**
+   * Validate JavaScript syntax of a test script
+   * @param {string} scriptContent - Script content to validate
+   * @returns {boolean} True if syntax is valid
+   */
+  validateScriptSyntax(scriptContent) {
+    try {
+      new vm.Script(scriptContent);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
    * Recursively add test scripts to collection items
    */
   addTestsToItems(items, testScripts) {
+    if (!items || !Array.isArray(items)) {
+      return;
+    }
+
     for (const item of items) {
+      if (!item) continue;
+
       if (item.request) {
         // This is a request item, add tests
-        const testScript = testScripts[item.name] || testScripts['default'];
+        // Try stable key first (method|path), then fall back to name, then default
+        const stableKey = this.generateTestKeyFromItem(item.request);
+        const testScript = testScripts[stableKey] || testScripts[item.name] || testScripts['default'];
+        
         if (testScript) {
+          const scriptLines = Array.isArray(testScript) ? testScript : testScript.split('\n');
+          const scriptContent = scriptLines.join('\n');
+          
+          // Validate script syntax before injection
+          if (!this.validateScriptSyntax(scriptContent)) {
+            logger.warn(`Invalid script syntax for item "${item.name}", skipping test injection`, {
+              key: stableKey
+            });
+            continue;
+          }
+          
           item.event = item.event || [];
           
           // Remove existing test events
@@ -309,7 +640,7 @@ class SpecHubClient {
             listen: 'test',
             script: {
               type: 'text/javascript',
-              exec: Array.isArray(testScript) ? testScript : testScript.split('\n')
+              exec: scriptLines
             }
           });
         }
@@ -443,18 +774,48 @@ class SpecHubClient {
   /**
    * Get all collections in workspace with metadata (for change detection)
    * Returns uid, name, and updatedAt for efficient polling
+   * Supports pagination for large workspaces
    */
   async getWorkspaceCollections() {
-    const result = await this.request('GET', `/collections?workspace=${this.workspaceId}`);
-    return result.collections || [];
+    const allCollections = [];
+    let cursor = null;
+    
+    do {
+      const url = `/collections?workspace=${this.workspaceId}${cursor ? `&cursor=${cursor}` : ''}`;
+      const result = await this.request('GET', url);
+      
+      if (result.collections) {
+        allCollections.push(...result.collections);
+      }
+      
+      // Check for pagination cursor in Postman API response
+      cursor = result.meta?.nextCursor || result.nextCursor || null;
+    } while (cursor);
+    
+    return allCollections;
   }
 
   /**
    * Get all environments in workspace with metadata (for change detection)
+   * Supports pagination for large workspaces
    */
   async getWorkspaceEnvironments() {
-    const result = await this.request('GET', `/environments?workspace=${this.workspaceId}`);
-    return result.environments || [];
+    const allEnvironments = [];
+    let cursor = null;
+    
+    do {
+      const url = `/environments?workspace=${this.workspaceId}${cursor ? `&cursor=${cursor}` : ''}`;
+      const result = await this.request('GET', url);
+      
+      if (result.environments) {
+        allEnvironments.push(...result.environments);
+      }
+      
+      // Check for pagination cursor in Postman API response
+      cursor = result.meta?.nextCursor || result.nextCursor || null;
+    } while (cursor);
+    
+    return allEnvironments;
   }
 
   /**
@@ -563,5 +924,4 @@ class SpecHubClient {
   }
 }
 
-export default SpecHubClient;
 export { SpecHubClient };

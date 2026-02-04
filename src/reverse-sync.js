@@ -15,6 +15,9 @@ import fs from 'fs';
 import path from 'path';
 import { ChangeDetector, CHANGE_DIRECTION } from './change-detector.js';
 import { SpecMerge } from './spec-merge.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger({ name: 'reverse-sync' });
 
 export class ReverseSync {
   constructor(client, config = {}) {
@@ -38,28 +41,28 @@ export class ReverseSync {
    * @param {object} options - Options (dryRun, outputPath)
    */
   async reverseSync(specPath, collectionUid, options = {}) {
-    console.log('\nReverse Sync: Postman -> OpenAPI Spec');
-    console.log('-'.repeat(50));
+    logger.info('\nReverse Sync: Postman -> OpenAPI Spec');
+    logger.info('-'.repeat(50));
 
     // Step 1: Load local spec
-    console.log('\n[1] Loading local spec...');
+    logger.info('\n[1] Loading local spec...');
     const localSpec = this.specMerge.readSpec(specPath);
-    console.log(`    Loaded: ${localSpec.info?.title} v${localSpec.info?.version}`);
+    logger.info(`    Loaded: ${localSpec.info?.title} v${localSpec.info?.version}`);
 
     // Step 2: Get Postman collection
-    console.log('\n[2] Fetching collection from Postman...');
+    logger.info('\n[2] Fetching collection from Postman...');
     const collection = await this.client.getCollection(collectionUid);
-    console.log(`    Collection: ${collection.collection?.info?.name}`);
+    logger.info(`    Collection: ${collection.collection?.info?.name}`);
 
     // Step 3: Transform collection to OpenAPI
-    console.log('\n[3] Transforming collection to OpenAPI...');
+    logger.info('\n[3] Transforming collection to OpenAPI...');
     let remoteSpec;
     try {
       remoteSpec = await this.client.getCollectionAsOpenApi(collectionUid);
-      console.log('    Transformation complete');
+      logger.info('    Transformation complete');
     } catch (error) {
-      console.error(`    Transformation failed: ${error.message}`);
-      console.log('    Falling back to description/example extraction only');
+      logger.error(`    Transformation failed: ${error.message}`);
+      logger.info('    Falling back to description/example extraction only');
       remoteSpec = null;
     }
 
@@ -67,7 +70,7 @@ export class ReverseSync {
     const baseSpec = await this.loadBaseline(specPath) || localSpec;
 
     // Step 5: Detect and classify changes
-    console.log('\n[4] Detecting changes...');
+    logger.info('\n[4] Detecting changes...');
     let changes;
 
     if (remoteSpec) {
@@ -92,22 +95,22 @@ export class ReverseSync {
 
     // Step 7: Check for blocking issues
     if (changes.blocked.length > 0) {
-      console.log('\n    Blocked changes detected (structural changes cannot reverse-sync):');
+      logger.info('\n    Blocked changes detected (structural changes cannot reverse-sync):');
       for (const blocked of changes.blocked.slice(0, 5)) {
-        console.log(`      - ${blocked.path}: ${blocked.reason}`);
+        logger.info(`      - ${blocked.path}: ${blocked.reason}`);
       }
       if (changes.blocked.length > 5) {
-        console.log(`      ... and ${changes.blocked.length - 5} more`);
+        logger.info(`      ... and ${changes.blocked.length - 5} more`);
       }
     }
 
     // Step 8: Apply safe changes
     if (changes.safeToSync.length === 0 && changes.tests.length === 0) {
-      console.log('\n    No changes to apply');
+      logger.info('\n    No changes to apply');
       return { status: 'no-changes', changes };
     }
 
-    console.log('\n[5] Applying changes...');
+    logger.info('\n[5] Applying changes...');
     const mergeResult = this.specMerge.mergeSpecs(
       localSpec,
       remoteSpec || localSpec,
@@ -121,7 +124,7 @@ export class ReverseSync {
         collection.collection
       );
       if (testsApplied > 0) {
-        console.log(`    Applied ${testsApplied} test scripts as x-postman-tests`);
+        logger.info(`    Applied ${testsApplied} test scripts as x-postman-tests`);
       }
     }
 
@@ -131,13 +134,13 @@ export class ReverseSync {
     // Backup original if modifying in place
     if (outputPath === specPath && !options.noBackup) {
       const backupPath = this.specMerge.backupSpec(specPath);
-      console.log(`    Backup created: ${backupPath}`);
+      logger.info(`    Backup created: ${backupPath}`);
     }
 
     this.specMerge.writeSpec(mergeResult.spec, outputPath);
-    console.log(`\n    Updated: ${outputPath}`);
-    console.log(`    Applied: ${mergeResult.applied.length} changes`);
-    console.log(`    Skipped: ${mergeResult.skipped.length} changes`);
+    logger.info(`\n    Updated: ${outputPath}`);
+    logger.info(`    Applied: ${mergeResult.applied.length} changes`);
+    logger.info(`    Skipped: ${mergeResult.skipped.length} changes`);
 
     // Step 11: Save new baseline for future 3-way merges
     await this.saveBaseline(specPath, mergeResult.spec);
@@ -156,13 +159,13 @@ export class ReverseSync {
    */
   printChangeSummary(changes) {
     const summary = this.changeDetector.getSummary(changes);
-    console.log('\n    Change Summary:');
-    console.log(`      Safe to sync: ${summary.safeToSync}`);
-    console.log(`      Needs review: ${summary.needsReview}`);
-    console.log(`      Blocked: ${summary.blocked}`);
-    console.log(`      Tests: ${summary.tests}`);
+    logger.info('\n    Change Summary:');
+    logger.info(`      Safe to sync: ${summary.safeToSync}`);
+    logger.info(`      Needs review: ${summary.needsReview}`);
+    logger.info(`      Blocked: ${summary.blocked}`);
+    logger.info(`      Tests: ${summary.tests}`);
     if (summary.hasConflicts) {
-      console.log('      (!) Conflicts detected');
+      logger.info('      (!) Conflicts detected');
     }
   }
 
@@ -177,7 +180,7 @@ export class ReverseSync {
         const content = fs.readFileSync(baselinePath, 'utf8');
         return JSON.parse(content);
       } catch (error) {
-        console.log(`    Could not load baseline: ${error.message}`);
+        logger.info(`    Could not load baseline: ${error.message}`);
       }
     }
 
@@ -353,9 +356,45 @@ export class ReverseSync {
 
           if (testEvents.length > 0) {
             const url = item.request.url;
-            const urlPath = typeof url === 'string'
-              ? new URL(url, 'http://localhost').pathname
-              : `/${(url.path || []).join('/')}`;
+            let urlPath;
+            
+            try {
+              if (typeof url === 'string') {
+                // Handle Postman variable syntax like {{baseUrl}}/users/123
+                // Extract path from URL, handling variables gracefully
+                const urlStr = url.replace(/\{\{[^}]+\}\}/g, 'http://localhost');
+                urlPath = new URL(urlStr).pathname;
+              } else if (url && typeof url === 'object') {
+                // Handle Postman URL object
+                if (url.path && Array.isArray(url.path)) {
+                  urlPath = '/' + url.path.join('/');
+                } else if (url.raw) {
+                  // Parse raw URL, handling variables
+                  const urlStr = url.raw.replace(/\{\{[^}]+\}\}/g, 'http://localhost');
+                  try {
+                    urlPath = new URL(urlStr).pathname;
+                  } catch {
+                    // Fallback: extract path manually
+                    urlPath = urlStr.replace(/^https?:\/\/[^\/]+/, '');
+                  }
+                } else {
+                  urlPath = '/';
+                }
+              } else {
+                urlPath = '/';
+              }
+            } catch (error) {
+              // If URL parsing fails, use a fallback
+              logger.debug(`URL parsing failed for item "${item.name}", using fallback`, { error: error.message });
+              if (typeof url === 'string') {
+                // Extract path after domain or use as-is if no domain
+                urlPath = url.replace(/^https?:\/\/[^\/]+/, '').replace(/^\{\{[^}]+\}\}/, '');
+                if (!urlPath.startsWith('/')) urlPath = '/' + urlPath;
+              } else {
+                urlPath = '/';
+              }
+            }
+            
             const method = (item.request.method || 'get').toLowerCase();
             const key = `${urlPath}|${method}`;
 

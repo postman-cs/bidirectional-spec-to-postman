@@ -17,6 +17,13 @@ const DEFAULT_CONFIG = {
   // Spec configuration
   spec: null,
 
+  // Logging configuration
+  logging: {
+    level: 'info',  // debug, info, warn, error, silent
+    format: 'text', // text, json
+    colors: true
+  },
+
   // Forward sync configuration
   forwardSync: {
     testLevel: 'all',
@@ -125,7 +132,8 @@ function loadConfigFile(configPath) {
 
     return config;
   } catch (error) {
-    console.warn(`Warning: Failed to load config from ${configPath}: ${error.message}`);
+    // Use process.stderr directly to avoid circular dependency with logger
+    process.stderr.write(`Warning: Failed to load config from ${configPath}: ${error.message}\n`);
     return null;
   }
 }
@@ -219,6 +227,15 @@ export function loadConfig(cliOptions = {}) {
   // Global options
   if (process.env.DRY_RUN) {
     config.dryRun = process.env.DRY_RUN === 'true';
+  }
+
+  // Logging options
+  if (process.env.LOG_LEVEL) {
+    config.logging.level = process.env.LOG_LEVEL.toLowerCase();
+  }
+
+  if (process.env.LOG_FORMAT) {
+    config.logging.format = process.env.LOG_FORMAT.toLowerCase();
   }
 
   // Apply CLI options (highest priority)

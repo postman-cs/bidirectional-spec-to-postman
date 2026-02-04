@@ -16,6 +16,7 @@ import { parseSpec } from './parser.js';
 import { generateTestScriptsForSpec, TestLevel } from './test-generator.js';
 import { generateEnvironmentForServer } from './environment-generator.js';
 import { SpecHubClient } from './spec-hub-client.js';
+import { createLogger, LogLevel } from './logger.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -23,31 +24,23 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Colors for output
-const GREEN = '\x1b[32m';
-const RED = '\x1b[31m';
-const YELLOW = '\x1b[33m';
-const BLUE = '\x1b[34m';
-const RESET = '\x1b[0m';
-
-function log(message, color = RESET) {
-  console.log(`${color}${message}${RESET}`);
-}
+// Create logger instance
+const logger = createLogger({ name: 'spec-hub-sync' });
 
 function logStep(step, message) {
-  log(`\n[${step}] ${message}`, BLUE);
+  logger.step(step, message);
 }
 
 function logSuccess(message) {
-  log(`✅ ${message}`, GREEN);
+  logger.success(message);
 }
 
 function logError(message) {
-  log(`❌ ${message}`, RED);
+  logger.error(message);
 }
 
 function logInfo(message) {
-  log(`ℹ️  ${message}`, YELLOW);
+  logger.info(message);
 }
 
 // CLI argument parsing
@@ -97,7 +90,7 @@ function parseArgs() {
 }
 
 function showHelp() {
-  console.log(`
+  const helpText = `
 Spec Hub Sync - Upload specs and generate collections with contract tests
 
 Usage:
@@ -133,7 +126,10 @@ Examples:
 
   # Dry run (validate only)
   node src/spec-hub-sync.js --spec specs/api.yaml --dry-run
-`);
+`;
+  // Use process.stdout for help text to maintain compatibility with JSON log streaming
+  // Help text is user-facing documentation, not a log event
+  process.stdout.write(helpText + '\n');
 }
 
 // Generate environments for each server
@@ -151,9 +147,9 @@ function generateEnvironments(api) {
 
 // Main sync function
 async function sync(options) {
-  log('\n═══════════════════════════════════════════════════════════', BLUE);
-  log('  Spec Hub Sync', BLUE);
-  log('═══════════════════════════════════════════════════════════\n', BLUE);
+  logger.info('═══════════════════════════════════════════════════════════');
+  logger.info('  Spec Hub Sync');
+  logger.info('═══════════════════════════════════════════════════════════');
 
   // Validate options
   if (!options.spec) {
@@ -319,31 +315,31 @@ async function sync(options) {
   }
 
   // Summary
-  log('\n═══════════════════════════════════════════════════════════', BLUE);
-  log('  SYNC SUMMARY', BLUE);
-  log('═══════════════════════════════════════════════════════════\n', BLUE);
+  logger.info('═══════════════════════════════════════════════════════════');
+  logger.info('  SYNC SUMMARY');
+  logger.info('═══════════════════════════════════════════════════════════');
 
   logSuccess(`Spec: ${specName}`);
   logSuccess(`Spec Hub ID: ${specId}`);
-  
+
   for (const coll of generatedCollections) {
     logSuccess(`${coll.type.toUpperCase()}: ${coll.name}`);
-    log(`   UID: ${coll.uid}`, GREEN);
+    logger.info(`   UID: ${coll.uid}`);
   }
 
-  log('\n📋 Next Steps:', BLUE);
-  log('  1. Open Postman and verify collections in workspace');
-  
+  logger.info('Next Steps:');
+  logger.info('  1. Open Postman and verify collections in workspace');
+
   if (generateSmoke) {
-    log(`  2. Run smoke tests: postman collection run "${specName} - Smoke Tests"`);
+    logger.info(`  2. Run smoke tests: postman collection run "${specName} - Smoke Tests"`);
   }
   if (generateContract) {
-    log(`  3. Run contract tests: postman collection run "${specName} - Contract Tests"`);
+    logger.info(`  3. Run contract tests: postman collection run "${specName} - Contract Tests"`);
   }
-  
-  log(`  4. On spec change, re-run: node src/spec-hub-sync.js --spec ${options.spec}`);
 
-  log('\n═══════════════════════════════════════════════════════════\n', BLUE);
+  logger.info(`  4. On spec change, re-run: node src/spec-hub-sync.js --spec ${options.spec}`);
+
+  logger.info('═══════════════════════════════════════════════════════════');
 
   return {
     specId,
@@ -372,7 +368,7 @@ if (isMainModule) {
 
   sync(options).catch(error => {
     logError(`Sync failed: ${error.message}`);
-    console.error(error);
+    logger.error('Stack trace', error);
     process.exit(1);
   });
 }
