@@ -276,12 +276,14 @@ export class SpecMerge {
 
   /**
    * Read spec from file (YAML or JSON)
+   * Uses JSON_SCHEMA for YAML to prevent arbitrary code execution
    */
   readSpec(filePath) {
     const content = fs.readFileSync(filePath, 'utf8');
     const isYaml = filePath.endsWith('.yaml') || filePath.endsWith('.yml');
 
-    return isYaml ? yaml.load(content) : JSON.parse(content);
+    // Use JSON_SCHEMA to prevent arbitrary code execution from malicious YAML
+    return isYaml ? yaml.load(content, { schema: yaml.JSON_SCHEMA }) : JSON.parse(content);
   }
 
   /**

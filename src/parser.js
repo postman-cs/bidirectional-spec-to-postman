@@ -56,22 +56,43 @@ function validateFileExists(specPath) {
   }
 
   const absolutePath = path.isAbsolute(specPath) ? specPath : path.resolve(process.cwd(), specPath);
+  const normalizedPath = path.normalize(absolutePath);
 
-  if (!fs.existsSync(absolutePath)) {
+  // Check if file exists first (for better error messages)
+  if (!fs.existsSync(normalizedPath)) {
     throw new ParserError(
       `Spec file not found: ${specPath}`,
       ParserErrorCode.FILE_NOT_FOUND,
-      { path: absolutePath }
+      { path: normalizedPath }
+    );
+  }
+
+  // Path traversal protection: ensure path is within allowed directories
+  const allowedRoots = [
+    process.cwd(),
+    path.resolve(process.cwd(), '..'), // Allow parent for monorepos
+  ];
+
+  const isAllowed = allowedRoots.some(root =>
+    normalizedPath.startsWith(path.normalize(root) + path.sep) ||
+    normalizedPath === path.normalize(root)
+  );
+
+  if (!isAllowed) {
+    throw new ParserError(
+      `Path traversal detected: ${specPath} resolves outside allowed directories`,
+      ParserErrorCode.FILE_NOT_READABLE,
+      { path: normalizedPath }
     );
   }
 
   try {
-    fs.accessSync(absolutePath, fs.constants.R_OK);
+    fs.accessSync(normalizedPath, fs.constants.R_OK);
   } catch (error) {
     throw new ParserError(
       `Spec file not readable: ${specPath}`,
       ParserErrorCode.FILE_NOT_READABLE,
-      { path: absolutePath, cause: error.message }
+      { path: normalizedPath, cause: error.message }
     );
   }
 }

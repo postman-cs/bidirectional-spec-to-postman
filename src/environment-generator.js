@@ -132,15 +132,17 @@ function generateQueryParameterVariables(api) {
 
 /**
  * Generate authentication variables from security schemes
+ * Variable names must match what collections expect (e.g., bearerToken for Bearer auth)
  */
 function generateAuthVariables(api) {
   const values = [];
   const securitySchemes = api.components?.securitySchemes || {};
-  
+
   for (const [name, scheme] of Object.entries(securitySchemes)) {
     if (scheme.type === 'http' && scheme.scheme === 'bearer') {
+      // Use 'bearerToken' to match collection expectation
       values.push({
-        key: 'auth_token',
+        key: 'bearerToken',
         value: '',
         type: 'secret',
         enabled: true
@@ -158,19 +160,24 @@ function generateAuthVariables(api) {
         { key: 'client_secret', value: '', type: 'secret', enabled: true },
         { key: 'access_token', value: '', type: 'secret', enabled: true }
       );
+    } else if (scheme.type === 'http' && scheme.scheme === 'basic') {
+      values.push(
+        { key: 'username', value: '', type: 'secret', enabled: true },
+        { key: 'password', value: '', type: 'secret', enabled: true }
+      );
     }
   }
-  
-  // If no security schemes, add generic auth_token
+
+  // If no security schemes, add generic bearerToken for consistency
   if (values.length === 0) {
     values.push({
-      key: 'auth_token',
+      key: 'bearerToken',
       value: '',
       type: 'secret',
       enabled: true
     });
   }
-  
+
   return values;
 }
 

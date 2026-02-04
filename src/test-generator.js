@@ -329,8 +329,9 @@ function generateAdvancedSchemaValidations(schema, path = 'dataToCheck') {
       
       // Enum validation
       if (propSchema.enum && propSchema.enum.length > 0) {
-        const enumValues = propSchema.enum.map(v => typeof v === 'string' ? `'${v}'` : v).join(', ');
-        validations.push(`    pm.expect(${propPath}).to.be.oneOf([${enumValues}]);`);
+        // Use JSON.stringify to safely escape enum values and prevent code injection
+        const enumJson = JSON.stringify(propSchema.enum);
+        validations.push(`    pm.expect(${propPath}).to.be.oneOf(${enumJson});`);
       }
       
       // Format validation (strings)
@@ -343,8 +344,9 @@ function generateAdvancedSchemaValidations(schema, path = 'dataToCheck') {
       
       // Pattern validation (regex)
       if (propSchema.pattern && propSchema.type === 'string') {
-        const escapedPattern = propSchema.pattern.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        validations.push(`    pm.expect(${propPath}).to.match(/${escapedPattern}/);`);
+        // Use JSON.stringify to safely escape regex patterns and prevent code injection
+        const safePattern = JSON.stringify(propSchema.pattern);
+        validations.push(`    pm.expect(${propPath}).to.match(new RegExp(${safePattern}));`);
       }
       
       // String constraints

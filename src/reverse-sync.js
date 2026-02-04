@@ -229,6 +229,7 @@ export class ReverseSync {
 
   /**
    * Recursively extract descriptions from collection items
+   * Only extracts changes that can be mapped to valid OpenAPI paths
    */
   extractDescriptionsFromItems(items, changes, pathPrefix) {
     for (const item of items || []) {
@@ -240,10 +241,19 @@ export class ReverseSync {
           `${pathPrefix}/${item.name}`
         );
       } else if (item.request) {
-        // Request item - extract description
+        // Request item - extract description only if it maps to a valid OpenAPI path
+        const urlPath = this.extractPathFromUrl(item.request.url);
+        const method = (item.request.method || 'get').toLowerCase();
+
+        // Validate this is a mappable OpenAPI path before adding
+        if (!this.isValidOpenAPIPath(urlPath, method)) {
+          logger.warn(`Cannot map collection item to OpenAPI: ${method} ${urlPath} - skipping`);
+          continue;
+        }
+
         if (item.description) {
           changes.safeToSync.push({
-            path: `request.${item.name}.description`,
+            path: `paths.${urlPath}.${method}.description`,
             kind: 'E',
             newValue: item.description,
             direction: CHANGE_DIRECTION.BIDIRECTIONAL,
@@ -257,7 +267,7 @@ export class ReverseSync {
           const testEvents = item.event.filter(e => e.listen === 'test');
           if (testEvents.length > 0) {
             changes.tests.push({
-              path: `request.${item.name}.tests`,
+              path: `paths.${urlPath}.${method}.tests`,
               kind: 'E',
               newValue: testEvents,
               direction: CHANGE_DIRECTION.COLLECTION_ONLY,
@@ -268,6 +278,67 @@ export class ReverseSync {
         }
       }
     }
+  }
+
+  /**
+   * Extract path from URL object/string
+   * @param {string|object} url - URL string or Postman URL object
+   * @returns {string} Extracted path
+   */
+  extractPathFromUrl(url) {
+    if (!url) return '/';
+
+    try {
+      if (typeof url === 'string') {
+        // Handle Postman variable syntax
+        const urlStr = url.replace(/\{\{[^}]+\}\}/g, 'http://localhost');
+        return new URL(urlStr).pathname || '/';
+      } else if (typeof url === 'object') {
+        if (url.path && Array.isArray(url.path)) {
+          return '/' + url.path.join('/');
+        } else if (url.pathname) {
+          return url.pathname;
+        } else if (url.raw) {
+          const urlStr = url.raw.replace(/\{\{[^}]+\}\}/g, 'http://localhost');
+          return new URL(urlStr).pathname || '/';
+        }
+      }
+    } catch (error) {
+      // Fallback: extract path manually
+      if (typeof url === 'string') {
+        return url.replace(/^https?:\/\/[^\/]+/, '').replace(/^\{\{[^}]+\}\}/, '') || '/';
+      }
+    }
+
+    return '/';
+  }
+
+  /**
+   * Check if a path/method combination is valid for OpenAPI
+   * @param {string} urlPath - URL path
+   * @param {string} method - HTTP method
+   * @returns {boolean} True if valid OpenAPI path
+   */
+  isValidOpenAPIPath(urlPath, method) {
+    // Must have a valid HTTP method
+    const validMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'];
+    if (!validMethods.includes(method.toLowerCase())) {
+      return false;
+    }
+
+    // Must start with /
+    if (!urlPath || !urlPath.startsWith('/')) {
+      return false;
+    }
+
+    // Path should not contain invalid characters for OpenAPI
+    // Allow alphanumeric, /, {}, -, _, and common URL characters
+    const validPathPattern = /^[a-zA-Z0-9\/{}._~!$&'()*+,;=:@-]+$/;
+    if (!validPathPattern.test(urlPath)) {
+      return false;
+    }
+
+    return true;
   }
 
   /**

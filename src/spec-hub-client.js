@@ -13,9 +13,40 @@ import { createLogger } from './logger.js';
 
 const POSTMAN_API_BASE = 'https://api.getpostman.com';
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_MAX_RPM = 250; // Conservative buffer below Postman's 300 RPM limit
 
 // Create logger instance
 const logger = createLogger({ name: 'spec-hub-client' });
+
+/**
+ * Token bucket rate limiter for Postman API
+ * Ensures we stay under the 300 RPM limit
+ */
+class RateLimiter {
+  constructor(rpm = DEFAULT_MAX_RPM) {
+    this.tokens = rpm;
+    this.lastRefill = Date.now();
+    this.rpm = rpm;
+  }
+
+  refill() {
+    const now = Date.now();
+    const elapsed = (now - this.lastRefill) / 60000; // minutes
+    this.tokens = Math.min(this.rpm, this.tokens + elapsed * this.rpm);
+    this.lastRefill = now;
+  }
+
+  async acquire() {
+    this.refill();
+    if (this.tokens >= 1) {
+      this.tokens--;
+      return;
+    }
+    const waitMs = (60000 / this.rpm) * (1 - this.tokens);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    return this.acquire();
+  }
+}
 
 /**
  * Custom error classes for different failure types
@@ -59,6 +90,7 @@ class SpecHubClient {
     this.maxRetries = options.maxRetries || 3;
     this.retryDelay = options.retryDelay || 1000; // Base delay in ms
     this.maxRetryDelay = options.maxRetryDelay || 30000; // Max delay in ms
+    this.rateLimiter = new RateLimiter(options.maxRpm || DEFAULT_MAX_RPM);
   }
 
   /**
@@ -136,6 +168,9 @@ class SpecHubClient {
    * @param {object} options - Additional options (timeout)
    */
   async request(method, endpoint, body = null, options = {}) {
+    // Acquire rate limit token before making request
+    await this.rateLimiter.acquire();
+
     const url = `${POSTMAN_API_BASE}${endpoint}`;
     const timeout = options.timeout || this.timeout;
 
@@ -378,6 +413,10 @@ class SpecHubClient {
 
     // No existing collection, generate new one
     logger.info(`Generating new collection: ${name}`);
+
+    // Record timestamp before generation to avoid race conditions
+    const generationStartTime = new Date().toISOString();
+
     const payload = {
       name,
       options: {
@@ -394,7 +433,7 @@ class SpecHubClient {
     );
 
     // Collection generation is async, wait for it to complete
-    await this.waitForCollectionGeneration(name);
+    await this.waitForCollectionGeneration(name, 15, generationStartTime);
 
     // Find and return the generated collection
     const collections = await this.request('GET', `/collections?workspace=${this.workspaceId}`);
@@ -447,16 +486,26 @@ class SpecHubClient {
 
   /**
    * Wait for collection generation to complete with exponential backoff
+   * Uses creation timestamp to avoid race conditions with concurrent pipelines
+   * @param {string} name - Collection name to wait for
+   * @param {number} maxAttempts - Maximum polling attempts
+   * @param {string|null} createdAfter - ISO timestamp to filter collections created after this time
    */
-  async waitForCollectionGeneration(name, maxAttempts = 15) {
+  async waitForCollectionGeneration(name, maxAttempts = 15, createdAfter = null) {
+    // Default to 5 seconds ago if no timestamp provided
+    const threshold = createdAfter || new Date(Date.now() - 5000).toISOString();
     let delay = 2000; // Start with 2 seconds
-    
+
     for (let i = 0; i < maxAttempts; i++) {
       await this.sleep(delay);
 
       try {
         const collections = await this.request('GET', `/collections?workspace=${this.workspaceId}`);
-        const collection = collections.collections?.find(c => c.name === name);
+        // Filter by name AND creation time to avoid race conditions
+        const collection = collections.collections?.find(c =>
+          c.name === name &&
+          (!c.createdAt || new Date(c.createdAt) > new Date(threshold))
+        );
 
         if (collection) {
           return collection;
@@ -464,7 +513,7 @@ class SpecHubClient {
       } catch (error) {
         logger.debug(`Waiting for generation... (${i + 1}/${maxAttempts})`);
       }
-      
+
       // Exponential backoff
       delay = Math.min(delay * 1.5, 10000);
     }
@@ -529,25 +578,25 @@ class SpecHubClient {
     const collectionData = await this.getCollection(collectionUid);
 
     // Validate response structure
-    if (!collectionData || !collectionData.collection) {
-      throw new Error(`Invalid collection response: collection data missing for ${collectionUid}`);
+    if (!collectionData?.collection) {
+      throw new Error(`Collection ${collectionUid} not found or has no data`);
     }
 
     const collection = collectionData.collection;
 
     // Validate item array
-    if (!collection.item || !Array.isArray(collection.item)) {
-      logger.warn(`Collection ${collectionUid} has no items array, skipping test injection`);
-      return collection;
+    if (!Array.isArray(collection.item)) {
+      logger.warn(`Collection ${collectionUid} has no items to inject tests into`);
+      return { success: true, injected: 0 };
     }
 
     // Recursively add tests to all request items
-    this.addTestsToItems(collection.item, testScripts);
+    const injectedCount = this.addTestsToItems(collection.item, testScripts);
 
     // Update the collection
     await this.updateCollection(collectionUid, collection);
 
-    return collection;
+    return { success: true, injected: injectedCount };
   }
 
   /**
@@ -603,54 +652,63 @@ class SpecHubClient {
 
   /**
    * Recursively add test scripts to collection items
+   * @returns {number} Number of test scripts injected
    */
-  addTestsToItems(items, testScripts) {
-    if (!items || !Array.isArray(items)) {
-      return;
+  addTestsToItems(items, testScripts, injectedCount = 0) {
+    if (!Array.isArray(items)) {
+      return injectedCount;
     }
 
     for (const item of items) {
       if (!item) continue;
 
-      if (item.request) {
-        // This is a request item, add tests
-        // Try stable key first (method|path), then fall back to name, then default
-        const stableKey = this.generateTestKeyFromItem(item.request);
-        const testScript = testScripts[stableKey] || testScripts[item.name] || testScripts['default'];
-        
-        if (testScript) {
-          const scriptLines = Array.isArray(testScript) ? testScript : testScript.split('\n');
-          const scriptContent = scriptLines.join('\n');
-          
-          // Validate script syntax before injection
-          if (!this.validateScriptSyntax(scriptContent)) {
-            logger.warn(`Invalid script syntax for item "${item.name}", skipping test injection`, {
-              key: stableKey
-            });
-            continue;
-          }
-          
-          item.event = item.event || [];
-          
-          // Remove existing test events
-          item.event = item.event.filter(e => e.listen !== 'test');
-          
-          // Add new test event
-          item.event.push({
-            listen: 'test',
-            script: {
-              type: 'text/javascript',
-              exec: scriptLines
-            }
-          });
-        }
+      // Recurse into folders first
+      if (Array.isArray(item.item)) {
+        injectedCount = this.addTestsToItems(item.item, testScripts, injectedCount);
+        continue;
       }
 
-      if (item.item) {
-        // Recurse into folders
-        this.addTestsToItems(item.item, testScripts);
+      // Skip items without valid requests
+      if (!item.request?.method || !item.request?.url) {
+        continue;
+      }
+
+      // This is a request item, add tests
+      // Try stable key first (method|path), then fall back to name, then default
+      const stableKey = this.generateTestKeyFromItem(item.request);
+      const testScript = testScripts[stableKey] || testScripts[item.name] || testScripts['default'];
+
+      if (testScript) {
+        const scriptLines = Array.isArray(testScript) ? testScript : testScript.split('\n');
+        const scriptContent = scriptLines.join('\n');
+
+        // Validate script syntax before injection
+        if (!this.validateScriptSyntax(scriptContent)) {
+          logger.warn(`Invalid script syntax for item "${item.name}", skipping test injection`, {
+            key: stableKey
+          });
+          continue;
+        }
+
+        item.event = item.event || [];
+
+        // Remove existing test events
+        item.event = item.event.filter(e => e.listen !== 'test');
+
+        // Add new test event
+        item.event.push({
+          listen: 'test',
+          script: {
+            type: 'text/javascript',
+            exec: scriptLines
+          }
+        });
+
+        injectedCount++;
       }
     }
+
+    return injectedCount;
   }
 
   /**
@@ -668,11 +726,26 @@ class SpecHubClient {
   }
 
   /**
-   * List specs in workspace
+   * List specs in workspace with pagination support
+   * Handles workspaces with >50 specs
    */
   async listSpecs() {
-    const result = await this.request('GET', `/specs?workspaceId=${this.workspaceId}`);
-    return result.specs || [];
+    const allSpecs = [];
+    let cursor = null;
+
+    do {
+      const url = `/specs?workspaceId=${this.workspaceId}${cursor ? `&cursor=${cursor}` : ''}`;
+      const result = await this.request('GET', url);
+
+      if (result.specs) {
+        allSpecs.push(...result.specs);
+      }
+
+      // Check for pagination cursor in Postman API response
+      cursor = result.meta?.nextCursor || result.nextCursor || null;
+    } while (cursor);
+
+    return allSpecs;
   }
 
   /**
