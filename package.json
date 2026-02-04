@@ -1,0 +1,29 @@
+{
+  "name": "oas-contract-test-generator",
+  "version": "1.0.0",
+  "description": "Generate Postman collections with contract tests from OpenAPI specs",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "generate": "node src/index.js",
+    "test:collection": "postman collection run output/collection.json --environment output/environment.json",
+    "demo": "npm run generate -- --spec specs/sample-api.yaml --output output/collection.json && echo 'Collection generated. Run with: postman collection run output/collection.json'"
+  },
+  "keywords": [
+    "openapi",
+    "postman",
+    "contract-testing",
+    "api-testing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@apidevtools/swagger-parser": "^10.1.0",
+    "postman-collection": "^4.5.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

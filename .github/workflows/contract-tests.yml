@@ -1,0 +1,286 @@
+name: Contract Tests
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'specs/**'
+      - 'src/**'
+      - '.github/workflows/contract-tests.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'specs/**'
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run tests against'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+  POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+
+jobs:
+  generate-and-upload:
+    runs-on: ubuntu-latest
+    name: Generate Collection & Upload to Postman
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Postman collection from spec
+        id: generate
+        run: |
+          echo "Generating collection from OpenAPI spec..."
+          node src/index.js \
+            --spec specs/sample-api.yaml \
+            --output output/collection.json \
+            --environment output/environment.json
+          
+          # Extract collection name for later use
+          COLLECTION_NAME=$(cat output/collection.json | jq -r '.info.name')
+          echo "collection_name=$COLLECTION_NAME" >> $GITHUB_OUTPUT
+
+      - name: Validate generated collection
+        run: |
+          echo "Validating generated collection..."
+          if [ ! -f output/collection.json ]; then
+            echo "❌ Collection file not found!"
+            exit 1
+          fi
+          
+          # Check if collection has items
+          ITEM_COUNT=$(cat output/collection.json | jq '[.. | objects | select(.request?) | .name] | length')
+          if [ "$ITEM_COUNT" -eq 0 ]; then
+            echo "❌ Collection has no requests!"
+            exit 1
+          fi
+          
+          echo "✅ Collection generated with $ITEM_COUNT requests"
+
+      - name: Upload collection to Postman
+        id: upload
+        run: |
+          echo "Uploading collection to Postman workspace..."
+          node src/api-uploader.js upload output/collection.json
+          echo "✅ Collection uploaded to Postman"
+
+      - name: Upload environment to Postman
+        run: |
+          echo "Uploading environment to Postman..."
+          
+          # Update environment file with secrets
+          cat output/environment.json | jq \
+            --arg baseUrl "${{ github.event.inputs.environment == 'production' && 'https://api.example.com/v1' || 'https://staging-api.example.com/v1' }}" \
+            --arg token "${{ secrets.API_AUTH_TOKEN }}" \
+            '.values |= map(if .key == "baseUrl" then .value = $baseUrl elif .key == "auth_token" then .value = $token else . end)' \
+            > output/environment.json
+          
+          node src/api-uploader.js upload-env output/environment.json
+          echo "✅ Environment uploaded to Postman"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-collection-${{ github.run_id }}
+          path: |
+            output/collection.json
+            output/environment.json
+          retention-days: 30
+
+  run-contract-tests:
+    runs-on: ubuntu-latest
+    name: Run Contract Tests with Postman CLI
+    needs: generate-and-upload
+    
+    steps:
+      - name: Setup Postman CLI
+        run: |
+          echo "Installing Postman CLI..."
+          curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
+          postman --version
+
+      - name: Run contract tests
+        id: run-tests
+        run: |
+          echo "Running contract tests with Postman CLI..."
+          
+          # Get collection UID from previous job
+          COLLECTION_NAME="Task Management API"
+          
+          # Run collection from Postman Cloud
+          postman collection run "$COLLECTION_NAME" \
+            --environment "Task Management API Environment" \
+            --reporters cli,junit \
+            --reporter-junit-export test-results.xml \
+            --verbose || TEST_EXIT_CODE=$?
+          
+          echo "test-exit-code=${TEST_EXIT_CODE:-0}" >> $GITHUB_OUTPUT
+          exit ${TEST_EXIT_CODE:-0}
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+        continue-on-error: true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_id }}
+          path: test-results.xml
+          retention-days: 30
+
+      - name: Comment PR with test results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const outcome = '${{ steps.run-tests.outcome }}';
+            const emoji = outcome === 'success' ? '✅' : '❌';
+            
+            const body = `## ${emoji} Contract Test Results
+            
+            **Status:** ${outcome}
+            **Commit:** ${context.sha.substring(0, 7)}
+            
+            The contract tests were:
+            1. Generated from the OpenAPI spec
+            2. Uploaded to Postman workspace
+            3. Executed with Postman CLI
+            
+            <details>
+            <summary>View Details</summary>
+            
+            - Collection: Task Management API
+            - Tests validate: status codes, response schemas, required fields, content-types
+            - Results saved as artifact: \`test-results-${{ github.run_id }}\`
+            
+            </details>
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail workflow if tests failed
+        if: steps.run-tests.outputs.test-exit-code != '0' && steps.run-tests.outputs.test-exit-code != ''
+        run: |
+          echo "❌ Contract tests failed!"
+          exit 1
+
+  diff-report:
+    runs-on: ubuntu-latest
+    name: Spec Change Report
+    needs: generate-and-upload
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate collection from PR branch
+        run: |
+          node src/index.js --spec specs/sample-api.yaml --output output/pr-collection.json
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base-branch
+
+      - name: Generate collection from base branch
+        run: |
+          cd base-branch
+          npm ci
+          node src/index.js --spec specs/sample-api.yaml --output ../output/base-collection.json
+
+      - name: Compare collections
+        id: compare
+        run: |
+          echo "Comparing collections..."
+          
+          # Extract endpoint names from both collections
+          echo "PR Branch Endpoints:" > diff-report.txt
+          cat output/pr-collection.json | jq -r '.. | objects | select(.request?) | .name' | sort >> diff-report.txt
+          
+          echo "" >> diff-report.txt
+          echo "Base Branch Endpoints:" >> diff-report.txt
+          cat output/base-collection.json | jq -r '.. | objects | select(.request?) | .name' | sort >> diff-report.txt
+          
+          # Count endpoints
+          PR_COUNT=$(cat output/pr-collection.json | jq '[.. | objects | select(.request?) | .name] | length')
+          BASE_COUNT=$(cat output/base-collection.json | jq '[.. | objects | select(.request?) | .name] | length')
+          
+          echo "" >> diff-report.txt
+          echo "Summary:" >> diff-report.txt
+          echo "- PR branch: $PR_COUNT endpoints" >> diff-report.txt
+          echo "- Base branch: $BASE_COUNT endpoints" >> diff-report.txt
+          
+          if [ "$PR_COUNT" -gt "$BASE_COUNT" ]; then
+            echo "- ✅ Added $(($PR_COUNT - $BASE_COUNT)) new endpoint(s)" >> diff-report.txt
+          elif [ "$PR_COUNT" -lt "$BASE_COUNT" ]; then
+            echo "- ⚠️ Removed $(($BASE_COUNT - $PR_COUNT)) endpoint(s)" >> diff-report.txt
+          else
+            echo "- No endpoint count changes" >> diff-report.txt
+          fi
+          
+          cat diff-report.txt
+
+      - name: Comment PR with diff report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const diffReport = fs.readFileSync('diff-report.txt', 'utf8');
+            
+            const body = `## 📊 Spec Change Report
+            
+            Comparing OpenAPI spec changes between base and PR branch:
+            
+            \`\`\`
+            ${diffReport}
+            \`\`\`
+            
+            **What this means:**
+            - Adding endpoints → New tests will be auto-generated
+            - Removing endpoints → Tests are cleanly removed (no orphans)
+            - Modifying schemas → Contract tests update to match
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

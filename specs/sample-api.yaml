@@ -1,0 +1,545 @@
+openapi: 3.0.3
+info:
+  title: Task Management API
+  description: |
+    A sample API for demonstrating spec-derived contract test generation.
+    
+    This API demonstrates:
+    - CRUD operations with full request/response schemas
+    - Multiple response codes (200, 201, 400, 404)
+    - Path and query parameters
+    - Request body validation
+    - Response examples
+    - Required field validation
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: api@example.com
+
+servers:
+  - url: https://api.example.com/v1
+    description: Production server
+  - url: https://staging-api.example.com/v1
+    description: Staging server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /tasks:
+    get:
+      summary: List all tasks
+      operationId: listTasks
+      description: |
+        Retrieve a paginated list of tasks. Supports filtering by status
+        and sorting by various fields.
+      tags:
+        - Tasks
+      parameters:
+        - name: status
+          in: query
+          description: Filter by task status
+          schema:
+            type: string
+            enum: [pending, in_progress, completed]
+            example: pending
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+            example: 10
+        - name: offset
+          in: query
+          description: Number of items to skip
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+            example: 0
+      responses:
+        '200':
+          description: Successfully retrieved list of tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                  - pagination
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Task'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+              example:
+                data:
+                  - id: "task-001"
+                    title: "Complete API documentation"
+                    description: "Write comprehensive API docs"
+                    status: "in_progress"
+                    priority: "high"
+                    createdAt: "2024-01-15T10:00:00Z"
+                    updatedAt: "2024-01-15T14:30:00Z"
+                  - id: "task-002"
+                    title: "Review pull requests"
+                    description: "Review team's PRs"
+                    status: "pending"
+                    priority: "medium"
+                    createdAt: "2024-01-15T11:00:00Z"
+                    updatedAt: "2024-01-15T11:00:00Z"
+                pagination:
+                  total: 2
+                  limit: 10
+                  offset: 0
+                  hasMore: false
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Bad Request"
+                message: "Invalid status value"
+                code: "INVALID_PARAMETER"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Create a new task
+      operationId: createTask
+      description: Create a new task with the provided details
+      tags:
+        - Tasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreate'
+            example:
+              title: "Implement new feature"
+              description: "Add user authentication"
+              status: "pending"
+              priority: "high"
+      responses:
+        '201':
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: "task-003"
+                title: "Implement new feature"
+                description: "Add user authentication"
+                status: "pending"
+                priority: "high"
+                createdAt: "2024-01-16T09:00:00Z"
+                updatedAt: "2024-01-16T09:00:00Z"
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Bad Request"
+                message: "Title is required"
+                code: "VALIDATION_ERROR"
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}:
+    get:
+      summary: Get a specific task
+      operationId: getTask
+      description: Retrieve detailed information about a specific task
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Unique identifier of the task
+          schema:
+            type: string
+            example: "task-001"
+      responses:
+        '200':
+          description: Task found and returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              examples:
+                pendingTask:
+                  summary: A pending task
+                  value:
+                    id: "task-001"
+                    title: "Complete API documentation"
+                    description: "Write comprehensive API docs"
+                    status: "pending"
+                    priority: "high"
+                    createdAt: "2024-01-15T10:00:00Z"
+                    updatedAt: "2024-01-15T10:00:00Z"
+                completedTask:
+                  summary: A completed task
+                  value:
+                    id: "task-004"
+                    title: "Fix bug in login"
+                    description: "Resolved authentication issue"
+                    status: "completed"
+                    priority: "critical"
+                    createdAt: "2024-01-10T08:00:00Z"
+                    updatedAt: "2024-01-12T16:00:00Z"
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Not Found"
+                message: "Task with ID 'task-999' not found"
+                code: "RESOURCE_NOT_FOUND"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      summary: Update a task
+      operationId: updateTask
+      description: Update all fields of an existing task
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Unique identifier of the task
+          schema:
+            type: string
+            example: "task-001"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdate'
+            example:
+              title: "Updated task title"
+              description: "Updated description"
+              status: "in_progress"
+              priority: "medium"
+      responses:
+        '200':
+          description: Task updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete a task
+      operationId: deleteTask
+      description: Permanently delete a task
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Unique identifier of the task
+          schema:
+            type: string
+            example: "task-001"
+      responses:
+        '204':
+          description: Task deleted successfully
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}/complete:
+    post:
+      summary: Mark task as complete
+      operationId: completeTask
+      description: Quickly mark a task as completed without full update
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: Unique identifier of the task
+          schema:
+            type: string
+            example: "task-001"
+      responses:
+        '200':
+          description: Task marked as complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: "task-001"
+                title: "Complete API documentation"
+                description: "Write comprehensive API docs"
+                status: "completed"
+                priority: "high"
+                createdAt: "2024-01-15T10:00:00Z"
+                updatedAt: "2024-01-16T10:00:00Z"
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Task already completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Conflict"
+                message: "Task is already completed"
+                code: "ALREADY_COMPLETED"
+
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      description: Check API health status - no authentication required
+      tags:
+        - System
+      security: []  # No auth required
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - timestamp
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded]
+                    example: healthy
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-01-16T10:00:00Z"
+                  version:
+                    type: string
+                    example: "1.0.0"
+              example:
+                status: healthy
+                timestamp: "2024-01-16T10:00:00Z"
+                version: "1.0.0"
+
+components:
+  schemas:
+    Task:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the task
+          example: "task-001"
+        title:
+          type: string
+          description: Brief title of the task
+          minLength: 1
+          maxLength: 200
+          example: "Complete API documentation"
+        description:
+          type: string
+          description: Detailed description of the task
+          maxLength: 2000
+          example: "Write comprehensive API docs"
+        status:
+          type: string
+          description: Current status of the task
+          enum: [pending, in_progress, completed]
+          example: "in_progress"
+        priority:
+          type: string
+          description: Priority level of the task
+          enum: [low, medium, high, critical]
+          default: medium
+          example: "high"
+        createdAt:
+          type: string
+          format: date-time
+          description: When the task was created
+          example: "2024-01-15T10:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the task was last updated
+          example: "2024-01-15T14:30:00Z"
+
+    TaskCreate:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Implement new feature"
+        description:
+          type: string
+          maxLength: 2000
+          example: "Add user authentication"
+        status:
+          type: string
+          enum: [pending, in_progress, completed]
+          default: pending
+          example: "pending"
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+          default: medium
+          example: "high"
+
+    TaskUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Updated task title"
+        description:
+          type: string
+          maxLength: 2000
+          example: "Updated description"
+        status:
+          type: string
+          enum: [pending, in_progress, completed]
+          example: "in_progress"
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+          example: "medium"
+
+    Pagination:
+      type: object
+      required:
+        - total
+        - limit
+        - offset
+        - hasMore
+      properties:
+        total:
+          type: integer
+          description: Total number of items available
+          example: 100
+        limit:
+          type: integer
+          description: Number of items per page
+          example: 20
+        offset:
+          type: integer
+          description: Number of items skipped
+          example: 0
+        hasMore:
+          type: boolean
+          description: Whether more items are available
+          example: true
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error type
+          example: "Bad Request"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Title is required"
+        code:
+          type: string
+          description: Machine-readable error code
+          example: "VALIDATION_ERROR"
+        details:
+          type: array
+          description: Additional error details
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                example: "title"
+              message:
+                type: string
+                example: "must not be empty"
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token authentication
