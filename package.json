@@ -20,7 +20,10 @@
     "demo": "npm run sync:spec-hub -- --spec specs/sample-api.yaml",
     "cleanup:collections": "node scripts/cleanup-collections.js",
     "cleanup:specs": "node scripts/cleanup-specs.js",
-    "test": "node --test src/__tests__/*.test.js"
+    "test": "node --test src/__tests__/*.test.js",
+    "test:unit": "node --test src/__tests__/*.test.js",
+    "test:integration": "node --test src/__tests__/integration/**/*.test.js",
+    "test:all": "npm run test:unit && npm run test:integration"
   },
   "keywords": [
     "openapi",

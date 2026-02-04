@@ -4,6 +4,8 @@
 
   "workspace": "${POSTMAN_WORKSPACE_ID}",
 
+  "spec": "specs/sample-api.yaml",
+
   "specs": {
     "task-management-api": {
       "path": "specs/sample-api.yaml",
@@ -24,9 +26,15 @@
     }
   },
 
+  "forwardSync": {
+    "testLevel": "all",
+    "exportToRepo": false
+  },
+
   "reverseSync": {
     "enabled": true,
     "conflictStrategy": "spec-wins",
+    "includeTests": true,
 
     "allowedFields": [
       "info.description",
@@ -61,6 +69,7 @@
     "format": "json",
     "prettyPrint": true,
     "sortKeys": true,
+    "includeEnvironments": true,
 
     "collections": {
       "directory": "collections",
@@ -86,6 +95,12 @@
       "filename": ".sync-manifest.json"
     }
   },
+
+  "bidirectional": {
+    "autoMerge": false
+  },
+
+  "dryRun": false,
 
   "forkWorkflow": {
     "enabled": true,

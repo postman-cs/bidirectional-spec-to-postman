@@ -3,7 +3,7 @@
  * Run with: node --test src/__tests__/sync.test.js
  */
 
-import { describe, it, mock, beforeEach } from 'node:test';
+import { describe, it, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { ChangeDetector, CHANGE_DIRECTION } from '../change-detector.js';
 import { SpecMerge } from '../spec-merge.js';
@@ -390,5 +390,113 @@ describe('Edge Cases', () => {
     assert.strictEqual(changes.safeToSync.length, 0, 'No safe changes');
     assert.strictEqual(changes.blocked.length, 0, 'No blocked changes');
     assert.strictEqual(changes.needsReview.length, 0, 'No review needed');
+  });
+});
+
+// ============================================================
+// CONFIG LOADER TESTS
+// ============================================================
+
+import { loadConfig, DEFAULT_CONFIG } from '../config-loader.js';
+
+describe('Config Loader', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    // Reset environment variables before each test
+    process.env = { ...originalEnv };
+    delete process.env.POSTMAN_WORKSPACE_ID;
+    delete process.env.POSTMAN_API_KEY;
+    delete process.env.SPEC_FILE;
+    delete process.env.TEST_LEVEL;
+    delete process.env.OUTPUT_DIR;
+    delete process.env.CONFLICT_STRATEGY;
+    delete process.env.AUTO_MERGE;
+    delete process.env.DRY_RUN;
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('should start with default config', () => {
+    const config = loadConfig({});
+
+    assert.strictEqual(config.version, '1.0');
+    assert.strictEqual(config.reverseSync.conflictStrategy, 'spec-wins');
+    assert.strictEqual(config.repoSync.outputDir, 'postman');
+    assert.strictEqual(config.forwardSync.testLevel, 'all');
+  });
+
+  it('should apply environment variables', () => {
+    process.env.POSTMAN_WORKSPACE_ID = 'test-workspace-123';
+    process.env.SPEC_FILE = 'specs/test-api.yaml';
+    process.env.TEST_LEVEL = 'smoke';
+    process.env.OUTPUT_DIR = 'output';
+    process.env.CONFLICT_STRATEGY = 'collection-wins';
+    process.env.AUTO_MERGE = 'true';
+    process.env.DRY_RUN = 'true';
+
+    const config = loadConfig({});
+
+    assert.strictEqual(config.workspace, 'test-workspace-123');
+    assert.strictEqual(config.spec, 'specs/test-api.yaml');
+    assert.strictEqual(config.forwardSync.testLevel, 'smoke');
+    assert.strictEqual(config.repoSync.outputDir, 'output');
+    assert.strictEqual(config.reverseSync.conflictStrategy, 'collection-wins');
+    assert.strictEqual(config.bidirectional.autoMerge, true);
+    assert.strictEqual(config.dryRun, true);
+  });
+
+  it('should apply CLI options with highest priority', () => {
+    process.env.POSTMAN_WORKSPACE_ID = 'env-workspace';
+    process.env.TEST_LEVEL = 'contract';
+
+    const config = loadConfig({
+      workspace: 'cli-workspace',
+      testLevel: 'all',
+      strategy: 'interactive'
+    });
+
+    assert.strictEqual(config.workspace, 'cli-workspace');
+    assert.strictEqual(config.forwardSync.testLevel, 'all');
+    assert.strictEqual(config.reverseSync.conflictStrategy, 'interactive');
+  });
+
+  it('should handle API key from environment', () => {
+    process.env.POSTMAN_API_KEY = 'test-api-key-123';
+
+    const config = loadConfig({});
+
+    assert.strictEqual(config._apiKey, 'test-api-key-123');
+  });
+
+  it('should handle API key from CLI (higher priority than env)', () => {
+    process.env.POSTMAN_API_KEY = 'env-api-key';
+
+    const config = loadConfig({ apiKey: 'cli-api-key' });
+
+    assert.strictEqual(config._apiKey, 'cli-api-key');
+  });
+
+  it('should handle boolean environment variables correctly', () => {
+    process.env.AUTO_MERGE = 'false';
+    process.env.DRY_RUN = 'false';
+    process.env.INCLUDE_ENVS = 'false';
+
+    const config = loadConfig({});
+
+    assert.strictEqual(config.bidirectional.autoMerge, false);
+    assert.strictEqual(config.dryRun, false);
+    assert.strictEqual(config.repoSync.includeEnvironments, false);
+  });
+
+  it('should handle missing environment variables gracefully', () => {
+    const config = loadConfig({});
+
+    assert.strictEqual(config.workspace, null);
+    // spec may be loaded from config file, so just check it's accessible
+    assert.ok('spec' in config);
+    assert.strictEqual(config._apiKey, undefined);
   });
 });

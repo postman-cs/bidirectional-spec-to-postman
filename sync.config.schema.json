@@ -17,6 +17,10 @@
       "type": "string",
       "description": "Postman workspace ID (supports ${ENV_VAR} syntax)"
     },
+    "spec": {
+      "type": "string",
+      "description": "Default OpenAPI spec file path"
+    },
     "specs": {
       "type": "object",
       "description": "Spec configurations keyed by identifier",
@@ -24,11 +28,21 @@
         "$ref": "#/definitions/specConfig"
       }
     },
+    "forwardSync": {
+      "$ref": "#/definitions/forwardSyncConfig"
+    },
     "reverseSync": {
       "$ref": "#/definitions/reverseSyncConfig"
     },
     "repoSync": {
       "$ref": "#/definitions/repoSyncConfig"
+    },
+    "bidirectional": {
+      "$ref": "#/definitions/bidirectionalConfig"
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "Preview changes without applying"
     },
     "forkWorkflow": {
       "$ref": "#/definitions/forkWorkflowConfig"
@@ -71,6 +85,20 @@
         }
       }
     },
+    "forwardSyncConfig": {
+      "type": "object",
+      "properties": {
+        "testLevel": {
+          "type": "string",
+          "enum": ["smoke", "contract", "all", "none"],
+          "description": "Test level to generate"
+        },
+        "exportToRepo": {
+          "type": "boolean",
+          "description": "Automatically export to repo after sync"
+        }
+      }
+    },
     "reverseSyncConfig": {
       "type": "object",
       "properties": {
@@ -110,6 +138,19 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Labels to apply to auto-created PRs"
+        },
+        "includeTests": {
+          "type": "boolean",
+          "description": "Include test scripts as vendor extensions"
+        }
+      }
+    },
+    "bidirectionalConfig": {
+      "type": "object",
+      "properties": {
+        "autoMerge": {
+          "type": "boolean",
+          "description": "Automatically apply safe changes from Postman"
         }
       }
     },
@@ -136,6 +177,10 @@
         "sortKeys": {
           "type": "boolean",
           "description": "Sort object keys for deterministic output"
+        },
+        "includeEnvironments": {
+          "type": "boolean",
+          "description": "Include environments in repo sync"
         },
         "collections": {
           "type": "object",

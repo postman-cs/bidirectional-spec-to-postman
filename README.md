@@ -45,10 +45,46 @@ npm install
 
 ### 2. Configure Environment
 
+**Option A: Environment Variables**
+
 ```bash
 export POSTMAN_API_KEY="your-api-key"
 export POSTMAN_WORKSPACE_ID="your-workspace-id"
+export SPEC_FILE="specs/sample-api.yaml"  # Optional: default spec path
 ```
+
+**Option B: Configuration File**
+
+Create `sync.config.json` in your project root:
+
+```json
+{
+  "$schema": "./sync.config.schema.json",
+  "version": "1.0",
+  "workspace": "${POSTMAN_WORKSPACE_ID}",
+  "spec": "specs/sample-api.yaml",
+  
+  "forwardSync": {
+    "testLevel": "all"
+  },
+  
+  "reverseSync": {
+    "conflictStrategy": "spec-wins"
+  },
+  
+  "repoSync": {
+    "outputDir": "postman"
+  }
+}
+```
+
+**Option C: CLI Arguments**
+
+```bash
+node src/cli.js forward --spec specs/api.yaml --workspace <id> --api-key <key>
+```
+
+**Priority**: CLI args > Environment variables > Config file > Defaults
 
 ### 3. Sync Spec to Spec Hub
 
@@ -124,6 +160,12 @@ npm run sync:repo -- --spec specs/api.yaml --output .
 npm run sync:reverse -- --spec specs/api.yaml --collection <uid>
 npm run sync:status -- --output .
 ```
+
+**Configuration Priority:**
+1. **CLI options** (highest priority)
+2. **Environment variables**
+3. **Config file** (`sync.config.json`)
+4. **Hardcoded defaults** (lowest priority)
 
 ### Legacy Local Generation
 
@@ -268,7 +310,133 @@ Tags help teams identify:
 - Which collections are safe for CI/CD (`smoke`, `contract`)
 - Which collections are for documentation only (`docs`)
 
-## 🔐 Environment Variables
+## ⚙️ Configuration
+
+The tool supports three levels of configuration with the following priority:
+
+1. **CLI options** (highest priority)
+2. **Environment variables**
+3. **Config file** (`sync.config.json`)
+4. **Hardcoded defaults** (lowest priority)
+
+### Environment Variables
+
+| Variable | Description | Maps To |
+|----------|-------------|---------|
+| `POSTMAN_API_KEY` | Postman API key for authentication | API authentication |
+| `POSTMAN_WORKSPACE_ID` | Target workspace ID | `workspace` |
+| `SPEC_FILE` | Default OpenAPI spec file path | `spec` |
+| `TEST_LEVEL` | Test level: `smoke`, `contract`, `all`, `none` | `forwardSync.testLevel` |
+| `EXPORT_TO_REPO` | Auto-export to repo after sync (`true`/`false`) | `forwardSync.exportToRepo` |
+| `OUTPUT_DIR` | Output directory for repo sync | `repoSync.outputDir` |
+| `INCLUDE_ENVS` | Include environments in repo sync (`true`/`false`) | `repoSync.includeEnvironments` |
+| `CONFLICT_STRATEGY` | Conflict resolution: `spec-wins`, `collection-wins`, `interactive` | `reverseSync.conflictStrategy` |
+| `INCLUDE_TESTS` | Include tests as vendor extensions (`true`/`false`) | `reverseSync.includeTests` |
+| `AUTO_MERGE` | Auto-merge safe changes in bidirectional sync (`true`/`false`) | `bidirectional.autoMerge` |
+| `DRY_RUN` | Preview changes without applying (`true`/`false`) | `dryRun` |
+
+### Configuration File
+
+Create a `sync.config.json` file in your project root:
+
+```json
+{
+  "$schema": "./sync.config.schema.json",
+  "version": "1.0",
+  "workspace": "${POSTMAN_WORKSPACE_ID}",
+  "spec": "specs/sample-api.yaml",
+  
+  "forwardSync": {
+    "testLevel": "all",
+    "exportToRepo": false
+  },
+  
+  "reverseSync": {
+    "enabled": true,
+    "conflictStrategy": "spec-wins",
+    "includeTests": true,
+    "storeTestsAs": "x-postman-tests",
+    "autoCreatePR": true,
+    "prLabels": ["auto-generated", "documentation"]
+  },
+  
+  "repoSync": {
+    "enabled": true,
+    "outputDir": "postman",
+    "format": "json",
+    "prettyPrint": true,
+    "sortKeys": true,
+    "includeEnvironments": true,
+    "collections": {
+      "directory": "collections",
+      "filenamePattern": "{{slug}}-{{type}}.collection.json"
+    },
+    "environments": {
+      "directory": "environments",
+      "filenamePattern": "{{slug}}-{{server}}.environment.json",
+      "redactSecrets": true,
+      "secretPatterns": [
+        "^api[_-]?key",
+        "^token",
+        "^secret",
+        "^password",
+        "^auth",
+        "^bearer"
+      ]
+    },
+    "manifest": {
+      "enabled": true,
+      "filename": ".sync-manifest.json"
+    }
+  },
+  
+  "bidirectional": {
+    "autoMerge": false
+  },
+  
+  "dryRun": false,
+  
+  "ci": {
+    "checkBreakingChanges": true,
+    "failOnBreaking": false,
+    "scheduleReverseSyncCheck": "0 * * * *"
+  }
+}
+```
+
+### Configuration Examples
+
+**Example 1: Minimal config with env vars**
+```bash
+export POSTMAN_WORKSPACE_ID="my-workspace"
+export POSTMAN_API_KEY="my-api-key"
+export SPEC_FILE="specs/api.yaml"
+
+spec-sync forward  # Uses all env vars
+```
+
+**Example 2: Full config file**
+```json
+{
+  "version": "1.0",
+  "workspace": "${POSTMAN_WORKSPACE_ID}",
+  "spec": "specs/api.yaml",
+  "forwardSync": {
+    "testLevel": "contract"
+  },
+  "bidirectional": {
+    "autoMerge": true
+  }
+}
+```
+
+**Example 3: CLI overrides everything**
+```bash
+# Uses config file but overrides test level
+spec-sync forward --test-level smoke
+```
+
+## 🔐 Environment Variables (Generated)
 
 The tool generates **one environment per server** defined in your OpenAPI spec. Each environment has its own `baseUrl`, auth tokens, and test data.
 
@@ -465,6 +633,7 @@ jobs:
 demo/
 ├── src/
 │   ├── cli.js                  # Unified CLI for bidirectional sync
+│   ├── config-loader.js        # Configuration loading with env var support
 │   ├── spec-hub-sync.js        # Forward sync orchestrator
 │   ├── spec-hub-client.js      # Spec Hub API client (with fork/PR support)
 │   ├── repo-sync.js            # Export Postman artifacts to repo
@@ -486,6 +655,8 @@ demo/
 ├── .github/workflows/
 │   ├── contract-tests.yml      # Test execution workflow
 │   └── sync.yml                # Bidirectional sync workflow (hourly)
+├── sync.config.json            # Project configuration (optional)
+├── sync.config.schema.json     # JSON Schema for config validation
 ├── package.json
 ├── README.md
 └── CLAUDE.md

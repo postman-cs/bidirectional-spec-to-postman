@@ -14,20 +14,33 @@ const DEFAULT_CONFIG = {
   version: '1.0',
   workspace: null,
 
+  // Spec configuration
+  spec: null,
+
+  // Forward sync configuration
+  forwardSync: {
+    testLevel: 'all',
+    exportToRepo: false
+  },
+
+  // Reverse sync configuration
   reverseSync: {
     enabled: true,
     conflictStrategy: 'spec-wins',
     storeTestsAs: 'x-postman-tests',
     autoCreatePR: true,
-    prLabels: ['auto-generated', 'documentation']
+    prLabels: ['auto-generated', 'documentation'],
+    includeTests: true
   },
 
+  // Repo sync configuration
   repoSync: {
     enabled: true,
     outputDir: 'postman',
     format: 'json',
     prettyPrint: true,
     sortKeys: true,
+    includeEnvironments: true,
     collections: {
       directory: 'collections',
       filenamePattern: '{{slug}}-{{type}}.collection.json'
@@ -50,6 +63,14 @@ const DEFAULT_CONFIG = {
       filename: '.sync-manifest.json'
     }
   },
+
+  // Bidirectional sync configuration
+  bidirectional: {
+    autoMerge: false
+  },
+
+  // Global options
+  dryRun: false,
 
   forkWorkflow: {
     enabled: true,
@@ -151,14 +172,62 @@ export function loadConfig(cliOptions = {}) {
     config._configPath = configPath;
   }
 
-  // Apply environment variables
+  // Apply environment variables (higher priority than config file)
+  
+  // Core credentials and workspace
   if (process.env.POSTMAN_WORKSPACE_ID) {
     config.workspace = process.env.POSTMAN_WORKSPACE_ID;
+  }
+  
+  // Spec file path
+  if (process.env.SPEC_FILE) {
+    config.spec = process.env.SPEC_FILE;
+  }
+  
+  // Forward sync options
+  if (process.env.TEST_LEVEL) {
+    config.forwardSync.testLevel = process.env.TEST_LEVEL;
+  }
+  
+  if (process.env.EXPORT_TO_REPO) {
+    config.forwardSync.exportToRepo = process.env.EXPORT_TO_REPO === 'true';
+  }
+  
+  // Repo sync options
+  if (process.env.OUTPUT_DIR) {
+    config.repoSync.outputDir = process.env.OUTPUT_DIR;
+  }
+  
+  if (process.env.INCLUDE_ENVS) {
+    config.repoSync.includeEnvironments = process.env.INCLUDE_ENVS !== 'false';
+  }
+  
+  // Reverse sync options
+  if (process.env.CONFLICT_STRATEGY) {
+    config.reverseSync.conflictStrategy = process.env.CONFLICT_STRATEGY;
+  }
+  
+  if (process.env.INCLUDE_TESTS) {
+    config.reverseSync.includeTests = process.env.INCLUDE_TESTS !== 'false';
+  }
+  
+  // Bidirectional sync options
+  if (process.env.AUTO_MERGE) {
+    config.bidirectional.autoMerge = process.env.AUTO_MERGE === 'true';
+  }
+  
+  // Global options
+  if (process.env.DRY_RUN) {
+    config.dryRun = process.env.DRY_RUN === 'true';
   }
 
   // Apply CLI options (highest priority)
   if (cliOptions.workspace) {
     config.workspace = cliOptions.workspace;
+  }
+  
+  if (cliOptions.spec) {
+    config.spec = cliOptions.spec;
   }
 
   if (cliOptions.output) {
@@ -167,6 +236,30 @@ export function loadConfig(cliOptions = {}) {
 
   if (cliOptions.strategy) {
     config.reverseSync.conflictStrategy = cliOptions.strategy;
+  }
+  
+  if (cliOptions.testLevel) {
+    config.forwardSync.testLevel = cliOptions.testLevel;
+  }
+  
+  if (cliOptions.exportToRepo !== undefined) {
+    config.forwardSync.exportToRepo = cliOptions.exportToRepo;
+  }
+  
+  if (cliOptions.autoMerge !== undefined) {
+    config.bidirectional.autoMerge = cliOptions.autoMerge;
+  }
+  
+  if (cliOptions.dryRun !== undefined) {
+    config.dryRun = cliOptions.dryRun;
+  }
+  
+  if (cliOptions.envs !== undefined) {
+    config.repoSync.includeEnvironments = cliOptions.envs;
+  }
+  
+  if (cliOptions.tests !== undefined) {
+    config.reverseSync.includeTests = cliOptions.tests;
   }
 
   // Store API key separately (never in config file)
@@ -243,10 +336,4 @@ export function getCollectionTags(config, collectionType) {
   return tags;
 }
 
-export default {
-  loadConfig,
-  getSpecConfig,
-  getCollectionName,
-  getCollectionTags,
-  DEFAULT_CONFIG
-};
+export { DEFAULT_CONFIG };
