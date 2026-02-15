@@ -6,9 +6,6 @@ on:
       - 'specs/**'
     branches:
       - main
-  schedule:
-    # Check for Postman changes once per hour (2 API calls per workspace)
-    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       direction:
@@ -116,7 +113,6 @@ jobs:
   # ============================================================
   reverse-sync:
     if: |
-      github.event_name == 'schedule' ||
       github.event.inputs.direction == 'reverse' ||
       github.event.inputs.direction == 'bidirectional'
     runs-on: ubuntu-latest
