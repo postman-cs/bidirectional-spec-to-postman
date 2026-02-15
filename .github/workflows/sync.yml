@@ -1,11 +1,6 @@
 name: Spec Sync
 
 on:
-  push:
-    paths:
-      - 'specs/**'
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       direction:

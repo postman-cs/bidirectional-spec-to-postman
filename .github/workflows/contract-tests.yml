@@ -1,17 +1,6 @@
 name: Contract Tests
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'specs/**'
-      - 'src/**'
-      - '.github/workflows/contract-tests.yml'
-  pull_request:
-    branches: [main, master]
-    paths:
-      - 'specs/**'
-      - 'src/**'
   workflow_dispatch:
     inputs:
       test_level:
@@ -59,29 +48,29 @@ jobs:
         id: sync
         run: |
           echo "Syncing spec to Postman Spec Hub..."
-          
+
           # Run sync and capture output
           node src/spec-hub-sync.js \
             --spec specs/sample-api.yaml \
-            --test-level ${{ github.event.inputs.test_level || 'all' }} \
+            --test-level "${{ github.event.inputs.test_level || 'all' }}" \
             2>&1 | tee sync-output.txt
-          
+
           # Extract spec name for later use
-          SPEC_NAME=$(grep "✅ Spec:" sync-output.txt | sed 's/.*Spec: //')
-          echo "spec_name=$SPEC_NAME" >> $GITHUB_OUTPUT
+          SPEC_NAME=$(grep "Spec:" sync-output.txt | sed 's/.*Spec: //')
+          echo "spec_name=$SPEC_NAME" >> "$GITHUB_OUTPUT"
           echo "Synced: $SPEC_NAME"
-          
+
           # Determine which collections to run based on test level
           TEST_LEVEL="${{ github.event.inputs.test_level || 'all' }}"
           if [ "$TEST_LEVEL" = "all" ] || [ "$TEST_LEVEL" = "smoke" ]; then
-            echo "run_smoke=true" >> $GITHUB_OUTPUT
+            echo "run_smoke=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run_smoke=false" >> $GITHUB_OUTPUT
+            echo "run_smoke=false" >> "$GITHUB_OUTPUT"
           fi
           if [ "$TEST_LEVEL" = "all" ] || [ "$TEST_LEVEL" = "contract" ]; then
-            echo "run_contract=true" >> $GITHUB_OUTPUT
+            echo "run_contract=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run_contract=false" >> $GITHUB_OUTPUT
+            echo "run_contract=false" >> "$GITHUB_OUTPUT"
           fi
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
@@ -185,57 +174,6 @@ jobs:
             sync-output.txt
           retention-days: 30
 
-      - name: Comment PR with test results
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            
-            const smokeOutcome = '${{ steps.smoke-tests.outcome }}';
-            const contractOutcome = '${{ steps.contract-tests.outcome }}';
-            const specName = '${{ steps.sync.outputs.spec_name }}';
-            
-            let smokeEmoji = smokeOutcome === 'success' ? '✅' : smokeOutcome === 'skipped' ? '⏭️' : '❌';
-            let contractEmoji = contractOutcome === 'success' ? '✅' : contractOutcome === 'skipped' ? '⏭️' : '❌';
-            
-            const body = `## 🔬 Contract Test Results
-            
-            **Spec:** ${specName}
-            **Commit:** ${context.sha.substring(0, 7)}
-            
-            | Test Type | Status |
-            |-----------|--------|
-            | ${smokeEmoji} Smoke Tests | ${smokeOutcome} |
-            | ${contractEmoji} Contract Tests | ${contractOutcome} |
-            
-            **What was tested:**
-            - Status code validation
-            - Response time thresholds
-            - Content-Type headers
-            - JSON Schema structure
-            - Required fields
-            - Enum values
-            - Format patterns (date-time, email, UUID)
-            - String/numeric constraints
-            
-            <details>
-            <summary>View Sync Output</summary>
-            
-            \`\`\`
-            ${fs.readFileSync('sync-output.txt', 'utf8').substring(0, 2000)}
-            \`\`\`
-            
-            </details>
-            `;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-
       - name: Fail workflow if tests failed
         if: |
           (steps.smoke-tests.outcome == 'failure' && steps.sync.outputs.run_smoke == 'true') ||
@@ -243,133 +181,3 @@ jobs:
         run: |
           echo "❌ Tests failed!"
           exit 1
-
-  spec-diff:
-    runs-on: ubuntu-latest
-    name: Spec Change Report
-    needs: sync-and-test
-    if: github.event_name == 'pull_request' && always()
-    
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Parse PR spec
-        id: parse-pr
-        run: |
-          # Extract info from PR spec
-          PR_INFO=$(node -e "
-            const yaml = require('yaml');
-            const fs = require('fs');
-            const spec = yaml.parse(fs.readFileSync('specs/sample-api.yaml', 'utf8'));
-            console.log(JSON.stringify({
-              title: spec.info?.title || 'Unknown',
-              version: spec.info?.version || 'unknown',
-              endpoints: Object.entries(spec.paths || {}).flatMap(([path, methods]) => 
-                Object.entries(methods).filter(([m]) => !m.startsWith('x-')).map(([method, op]) => ({
-                  method: method.toUpperCase(),
-                  path: path,
-                  summary: op?.summary || ''
-                }))
-              )
-            }));
-          ")
-          echo "pr_info=$PR_INFO" >> $GITHUB_OUTPUT
-
-      - name: Checkout base branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.base_ref }}
-          path: base-branch
-
-      - name: Parse base spec
-        id: parse-base
-        run: |
-          cd base-branch
-          # Extract info from base spec
-          BASE_INFO=$(node -e "
-            const yaml = require('yaml');
-            const fs = require('fs');
-            const spec = yaml.parse(fs.readFileSync('specs/sample-api.yaml', 'utf8'));
-            console.log(JSON.stringify({
-              title: spec.info?.title || 'Unknown',
-              version: spec.info?.version || 'unknown',
-              endpoints: Object.entries(spec.paths || {}).flatMap(([path, methods]) => 
-                Object.entries(methods).filter(([m]) => !m.startsWith('x-')).map(([method, op]) => ({
-                  method: method.toUpperCase(),
-                  path: path,
-                  summary: op?.summary || ''
-                }))
-              )
-            }));
-          ")
-          echo "base_info=$BASE_INFO" >> $GITHUB_OUTPUT
-
-      - name: Generate diff report
-        id: diff
-        run: |
-          node -e "
-            const pr = ${{ steps.parse-pr.outputs.pr_info }};
-            const base = ${{ steps.parse-base.outputs.base_info }};
-            
-            const prEndpoints = new Set(pr.endpoints.map(e => \`\${e.method} \${e.path}\`));
-            const baseEndpoints = new Set(base.endpoints.map(e => \`\${e.method} \${e.path}\`));
-            
-            const added = [...prEndpoints].filter(e => !baseEndpoints.has(e));
-            const removed = [...baseEndpoints].filter(e => !prEndpoints.has(e));
-            
-            console.log('## 📊 Spec Change Report\\n');
-            console.log(\`**Title:** \${pr.title}\`);
-            console.log(\`**Version:** \${base.version} → \${pr.version}\\n\`);
-            
-            console.log('| Metric | Count |');
-            console.log('|--------|-------|');
-            console.log(\`| PR Branch Endpoints | \${pr.endpoints.length} |\`);
-            console.log(\`| Base Branch Endpoints | \${base.endpoints.length} |\`);
-            console.log(\`| Added | \${added.length} |\`);
-            console.log(\`| Removed | \${removed.length} |\\n\`);
-            
-            if (added.length > 0) {
-              console.log('### ✅ Added Endpoints');
-              added.forEach(e => console.log(\`- \${e}\`));
-              console.log('');
-            }
-            
-            if (removed.length > 0) {
-              console.log('### ⚠️ Removed Endpoints');
-              removed.forEach(e => console.log(\`- \${e}\`));
-              console.log('');
-            }
-            
-            console.log('**Impact:**');
-            console.log('- New endpoints → Contract tests auto-generated');
-            console.log('- Removed endpoints → Tests cleanly removed (no orphans)');
-            console.log('- Schema changes → Tests update to match');
-          " > diff-report.md
-          
-          cat diff-report.md
-
-      - name: Comment PR with diff report
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const diffReport = fs.readFileSync('diff-report.md', 'utf8');
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: diffReport
-            });
